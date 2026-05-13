@@ -12,10 +12,10 @@ your `deps` without breaking anything.
 
 The spec coverage and design rationale live in [`SPEC.md`](SPEC.md).
 
-> Status: alpha. The wire format is implemented; the test suite
-> round-trips against the upstream `flatc` corpus. Phase 3 features
-> (vectors of unions, 64-bit offsets, `nested_flatbuffer`,
-> `key`/`shared`/`hash` attributes) are not yet implemented.
+> Status: alpha. The wire format is implemented end-to-end; the test
+> suite round-trips against the upstream `flatc` corpus. The
+> [Limitations](#limitations) section below enumerates what's known
+> not to work yet.
 
 ## Installation
 
@@ -165,6 +165,53 @@ Off by default. Enable per-schema with `--niceties`:
 When neither is enabled (the default), generated tables reference no
 external libraries. The library only ships the behaviour module
 itself; the `:jason` derive only activates when the dep is present.
+
+## Limitations
+
+The wire format is implemented end-to-end — tables, structs, enums,
+unions, fixed-size arrays, bit_flags, vectors of every supported
+element type (including unions), NaN / Infinity handling, the
+`(key)` / `(shared)` / `(hash)` / `(nested_flatbuffer)` / `(force_align)`
+attributes, file identifier, size-prefixed buffers, and required
+fields all work and are exercised against the upstream `flatc` test
+corpus.
+
+Known gaps:
+
+- **64-bit offsets and `(vector64)`.** Schemas that use these
+  attributes parse, but encode/decode treats them as 32-bit. Fully
+  honoring them requires a two-phase builder (64-bit-offset targets
+  must be written *before* 32-bit data so 32-bit uoffsets retain
+  their 4 GB reach). Schemas without these tags are fine.
+- **Optional scalars (`field: int = null`).** The decoder returns
+  `nil` when the slot is absent from the vtable and the schema
+  default is `null`, but it can't distinguish "absent" from
+  "explicitly written as 0" on the wire — flatc has the same
+  ambiguity in JSON. JSON round-trips work correctly; per-field
+  presence introspection does not.
+- **`force_align` on tables.** Honored on structs (resolver layout)
+  and vector fields (encoder alignment). Tables don't yet pick up
+  the attribute when computing their soffset alignment in
+  `end_table/1`.
+- **`rpc_service`.** Parsed and surfaced in the resolved schema; no
+  client/server code is generated. By design — the spec earmarks
+  this as data only, not transport.
+- **flatc's lax JSON dialect.** The reference compiler accepts
+  unquoted keys and trailing commas in `.json` files; our
+  `from_json/1` requires strict JSON. flatc's *output* with
+  `--strict-json` is normalized internally for the differential
+  tests (bare `nan`/`inf`/`-inf` get quoted), but importing a lax
+  upstream `.json` directly through our code won't parse.
+- **Float precision.** FlatBuffers stores f32 as 4 bytes; our
+  decoder widens to Elixir's f64. `to_json/1` emits the f64-precision
+  decimal (e.g. `3.14520001411438`) where flatc emits the shortest
+  round-trip (`3.1452`). The fixture diff compares floats at f32 bit
+  precision to keep this from showing up as a false positive.
+- **Hash differential.** We've verified `Wire.fnv1_32/1` produces
+  byte-identical output to `flatc --binary` for a field tagged
+  `(hash: "fnv1_32")`. The 64-bit FNV variants follow the same
+  algorithm but haven't been differentially confirmed against flatc
+  on a real schema.
 
 ## Testing against `flatc`
 
