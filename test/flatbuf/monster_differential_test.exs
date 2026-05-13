@@ -107,6 +107,19 @@ defmodule Flatbuf.MonsterDifferentialTest do
       [t5a, t5b] = decoded.test5
       assert {t5a.a, t5a.b} == {10, 20}
       assert {t5b.a, t5b.b} == {30, 40}
+
+      # Union field — manual-split via explicit (id:8). Variant should be
+      # the nested Monster named "Fred".
+      assert {:Monster, inner} = decoded.test
+      assert inner.name == "Fred"
+
+      # Sub-table.
+      assert decoded.enemy.name == "Fred"
+
+      # Test float defaults (NaN/Inf round-trip).
+      assert decoded.nan_default == :nan
+      assert decoded.inf_default == :infinity
+      assert decoded.negative_inf_default == :neg_infinity
     end
   else
     @tag skip: "upstream corpus missing — run `mix flatbuf.fetch_fixtures`"

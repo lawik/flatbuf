@@ -229,16 +229,18 @@ defmodule Flatbuf.Codegen.Table do
   defp field_decode_body(f, schema) do
     case f.type do
       {:union, fqn} ->
-        # Union fields don't fit the regular `vtable_slot -> read` pattern:
-        # the discriminator is in slot N, the uoffset in slot N+2, and we
-        # have to read both before we can dispatch.
-        value_slot = f.vtable_slot + 2
+        # Union fields use two adjacent vtable slots: discriminator (u8)
+        # at `vtable_slot - 2`, value (uoffset) at `vtable_slot`. This
+        # matches both the auto-expanded case (slot allocated as the
+        # higher of a pair) and the explicit-id case (where the schema's
+        # `(id: N)` refers to the value slot).
+        disc_slot = f.vtable_slot - 2
 
         """
-              case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+              case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
                 0 -> nil
                 type_o ->
-                  case Wire.read_vtable_field(buf, pos, #{value_slot}) do
+                  case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
                     0 -> nil
                     value_o ->
                       disc = Wire.read_u8(buf, pos + type_o)
@@ -652,18 +654,14 @@ defmodule Flatbuf.Codegen.Table do
         """
 
       {:union, _fqn} ->
-        value_slot = slot + 2
+        # `slot` is the value slot; discriminator lives at slot - 2.
+        disc_slot = slot - 2
         disc_var = "disc_#{f.name}"
         addr_var = "addr_#{f.name}"
 
-        # First the value uoffset (slot N+2), then the u8 discriminator
-        # (slot N). Order doesn't change correctness — the vtable maps
-        # slot → offset either way — but pushing the offset first keeps
-        # the field-add code shape consistent with how flatc-generated
-        # code lays it out.
         """
-            b = Wire.add_field_offset(b, #{value_slot}, #{addr_var})
-            b = Wire.add_field_scalar(b, #{slot}, #{disc_var}, 0, &Wire.push_u8/2)
+            b = Wire.add_field_offset(b, #{slot}, #{addr_var})
+            b = Wire.add_field_scalar(b, #{disc_slot}, #{disc_var}, 0, &Wire.push_u8/2)
         """
     end
   end

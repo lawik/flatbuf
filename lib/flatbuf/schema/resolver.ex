@@ -259,6 +259,13 @@ defmodule Flatbuf.Schema.Resolver do
       | types: Map.new(schema.types, fn {k, v} -> {k, resolve_refs(v, schema)} end)
     }
 
+    # Collapse manual union-split pairs (`foo_type:UnionT; foo:UnionT;`)
+    # before slot assignment so the surviving field gets the right slot.
+    schema = %{
+      schema
+      | types: Map.new(schema.types, fn {k, v} -> {k, collapse_union_splits(v)} end)
+    }
+
     schema = %{schema | types: Map.new(schema.types, fn {k, v} -> {k, assign_slots(v)} end)}
 
     # Struct layouts must be computed in dependency order — a struct
@@ -272,6 +279,39 @@ defmodule Flatbuf.Schema.Resolver do
 
     schema
   end
+
+  # If a table is declared with `foo_type:UnionT; foo:UnionT;` (the
+  # manual-split form that monster_test.fbs uses with explicit ids),
+  # collapse the pair into one logical union field named `foo`.
+  # The discriminator slot follows the `_type` field's slot; the value
+  # slot is `disc_slot + 2`, as auto-expanded unions already do.
+  defp collapse_union_splits(%Table{fields: fields} = t),
+    do: %{t | fields: do_collapse(fields, [])}
+
+  defp collapse_union_splits(other), do: other
+
+  defp do_collapse([], acc), do: Enum.reverse(acc)
+
+  defp do_collapse([a, b | rest], acc) do
+    if manual_union_pair?(a, b) do
+      # `b` is the value field and already carries the correct id (or
+      # gets the right auto-allocated slot from assign_slots). The
+      # discriminator field `a` was redundant — slot - 2 is derived.
+      do_collapse(rest, [b | acc])
+    else
+      do_collapse([b | rest], [a | acc])
+    end
+  end
+
+  defp do_collapse([f | rest], acc), do: do_collapse(rest, [f | acc])
+
+  defp manual_union_pair?(%Field{type: {:union, t}} = a, %Field{type: {:union, t}} = b) do
+    a_name = Atom.to_string(a.name)
+    b_name = Atom.to_string(b.name)
+    String.ends_with?(a_name, "_type") and String.replace_suffix(a_name, "_type", "") == b_name
+  end
+
+  defp manual_union_pair?(_, _), do: false
 
   defp layout_all_structs(schema) do
     structs = Schema.structs(schema)
@@ -432,22 +472,28 @@ defmodule Flatbuf.Schema.Resolver do
     {assigned, _} =
       Enum.map_reduce(fields, 4, fn f, slot ->
         explicit = Map.get(f.attributes, :id)
-        slot_used = if is_integer(explicit), do: 4 + explicit * 2, else: slot
-        step = slot_step(f.type)
-        {%{f | vtable_slot: slot_used}, slot_used + step}
+
+        # The schema's `(id: N)` always refers to a single voffset slot
+        # (4 + N*2). For a union field that single slot is the *value*
+        # slot — the matching discriminator lives at slot - 2. Without
+        # an explicit id, a union still consumes two consecutive slots,
+        # but the value slot is the higher of the two so the next field
+        # starts cleanly at value + 2.
+        slot_used =
+          cond do
+            is_integer(explicit) -> 4 + explicit * 2
+            match?({:union, _}, f.type) or match?({:vector, {:union, _}}, f.type) -> slot + 2
+            true -> slot
+          end
+
+        next = slot_used + 2
+        {%{f | vtable_slot: slot_used}, next}
       end)
 
     %{t | fields: assigned}
   end
 
   defp assign_slots(other), do: other
-
-  # Union fields (and vectors of unions) consume two adjacent vtable
-  # slots — the u8 discriminator at slot N, the uoffset value at N+2 —
-  # so the next field starts at N+4.
-  defp slot_step({:union, _}), do: 4
-  defp slot_step({:vector, {:union, _}}), do: 4
-  defp slot_step(_), do: 2
 
   defp compute_struct_layout(%SchemaStruct{} = s, schema) do
     {layout, total, max_align} =
