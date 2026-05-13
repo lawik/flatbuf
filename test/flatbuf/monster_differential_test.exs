@@ -24,23 +24,13 @@ defmodule Flatbuf.MonsterDifferentialTest do
     @tests_root Upstream.tests_root()
     @schema Path.join(@tests_root, "monster_test.fbs")
     @binary_path Path.join(@tests_root, "monsterdata_test.mon")
-    @json_path Path.join(@tests_root, "monsterdata_test.json")
 
-    setup_all do
-      {:ok, schema} =
-        Flatbuf.Schema.Resolver.resolve_path(@schema,
-          include_paths: Upstream.include_paths()
-        )
-
-      artifacts =
-        Flatbuf.Codegen.generate(schema, wire_module: Flatbuf.MonsterDifferentialTest.Wire)
-
-      for {_, src} <- artifacts do
-        Code.compile_string(src)
-      end
-
-      :ok
-    end
+    # Compile the upstream Monster schema at test-file compile time so
+    # references like `MyGame.Example.Monster.decode/1` resolve.
+    Flatbuf.Test.CodegenCompiler.compile_path!(@schema,
+      include_paths: Upstream.include_paths(),
+      wire_module: Flatbuf.MonsterDifferentialTest.Wire
+    )
 
     test "verify(monsterdata_test.mon) accepts the upstream buffer" do
       bin = File.read!(@binary_path)

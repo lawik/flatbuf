@@ -11,8 +11,7 @@ defmodule Flatbuf.VerifierTest do
 
   use ExUnit.Case, async: false
 
-  alias Flatbuf.Codegen
-  alias Flatbuf.Schema.Resolver
+  alias Flatbuf.Test.CodegenCompiler
 
   @schema """
   namespace VerifyT;
@@ -27,16 +26,7 @@ defmodule Flatbuf.VerifierTest do
   root_type Outer;
   """
 
-  setup_all do
-    {:ok, schema} = Resolver.resolve_source(@schema)
-    artifacts = Codegen.generate(schema, wire_module: Flatbuf.VerifierTest.Wire)
-
-    for {_, src} <- artifacts do
-      Code.compile_string(src)
-    end
-
-    :ok
-  end
+  CodegenCompiler.compile_source!(@schema, wire_module: Flatbuf.VerifierTest.Wire)
 
   test "a well-formed buffer verifies" do
     value = %{name: "ok", inner: %{value: 7}, inventory: [1, 2, 3]}

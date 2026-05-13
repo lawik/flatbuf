@@ -35,6 +35,13 @@ defmodule Flatbuf.Codegen.Table do
     verify_body = build_verify_at(t, schema)
     verify_top = build_verify_top(is_root?)
 
+    # An empty table has nothing to read in decode_at; underscore the
+    # params to avoid the "variable is unused" warning the compiler
+    # would otherwise emit on the generated source.
+    has_fields? = t.fields != []
+    buf_param = if has_fields?, do: "buf", else: "_buf"
+    pos_param = if has_fields?, do: "pos", else: "_pos"
+
     source = """
     defmodule #{module_name} do
       @moduledoc "Generated from FlatBuffers table #{t.name}. Do not edit."
@@ -46,7 +53,7 @@ defmodule Flatbuf.Codegen.Table do
     #{encode_funs}#{json_top}
       @doc "Decode a table at absolute position `pos` within `buf`."
       @spec decode_at(binary(), non_neg_integer()) :: t()
-      def decode_at(buf, pos) do
+      def decode_at(#{buf_param}, #{pos_param}) do
         %__MODULE__{
     #{decode_at_body}    }
       end
@@ -71,7 +78,7 @@ defmodule Flatbuf.Codegen.Table do
       @doc false
       def __verify_at__(_buf, _pos, 0), do: {:error, :depth_exceeded}
 
-      def __verify_at__(buf, pos, depth) do
+      def __verify_at__(buf, pos, #{if recurses?(t), do: "depth", else: "_depth"}) do
         with {:ok, _vt_pos, _vt_size, _inline_size} <- Wire.verify_table_header(buf, pos) do
     #{verify_body}    end
       end
@@ -712,6 +719,18 @@ defmodule Flatbuf.Codegen.Table do
   # -----------------------------------------------------------------------
   # Verifier
   # -----------------------------------------------------------------------
+
+  # True if any of the table's fields needs to recurse with `depth - 1`.
+  # When false, the verifier's `depth` parameter is unused and the
+  # generated source uses `_depth` to keep the compiler quiet.
+  defp recurses?(t) do
+    Enum.any?(t.fields, fn f -> recurses_field?(f.type) end)
+  end
+
+  defp recurses_field?({:table, _}), do: true
+  defp recurses_field?({:union, _}), do: true
+  defp recurses_field?({:vector, {:table, _}}), do: true
+  defp recurses_field?(_), do: false
 
   defp build_verify_at(t, schema) do
     clauses =

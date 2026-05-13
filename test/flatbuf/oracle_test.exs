@@ -26,18 +26,16 @@ defmodule Flatbuf.OracleTest do
     @table_module Com.Company.Test.Person
     @wire_module Flatbuf.OracleTest.Wire
 
+    # Compile the long_namespace.fbs schema at test-file compile time so
+    # `Com.Company.Test.Person.encode/1` resolves below.
+    Flatbuf.Test.CodegenCompiler.compile_path!(@schema_path,
+      wire_module: @wire_module
+    )
+
     setup_all do
-      # Will auto-download the binary on first use; subsequent runs
-      # reuse the cached copy under _build/test/flatc/.
+      # Auto-download the binary on first use; subsequent runs reuse
+      # the cached copy under _build/test/flatc/.
       _ = Flatc.ensure_available!()
-
-      {:ok, artifacts} =
-        Flatbuf.generate_from_path(@schema_path, wire_module: @wire_module)
-
-      for {_, src} <- artifacts do
-        Code.compile_string(src)
-      end
-
       :ok
     end
 

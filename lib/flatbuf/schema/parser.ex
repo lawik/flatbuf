@@ -471,7 +471,12 @@ defmodule Flatbuf.Schema.Parser do
           end
 
         {var_attrs, rest3} = maybe_parse_attribute_list(rest2)
-        variant_name = full |> String.split(".") |> List.last()
+
+        # flatc's convention for the auto-generated variant name on a
+        # dotted reference is dots → underscores, so two qualified
+        # types ending in `Monster` don't collide. Plain references
+        # keep their name as-is.
+        variant_name = String.replace(full, ".", "_")
         {%{name: variant_name, type: {:name, full}, docs: docs, attributes: var_attrs}, rest3}
     end
   end

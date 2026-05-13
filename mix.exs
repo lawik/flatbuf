@@ -8,6 +8,10 @@ defmodule Flatbuf.MixProject do
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
+      # The conformance manifest is a data file consumed by the test
+      # support code; it lives under test/ but isn't itself a test
+      # module.
+      test_ignore_filters: [&String.ends_with?(&1, "conformance_manifest.exs")],
       deps: deps(),
       name: "Flatbuf",
       description: "TODO: write a proper description",

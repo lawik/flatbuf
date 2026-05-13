@@ -10,8 +10,7 @@ defmodule Flatbuf.UnionRoundtripTest do
 
   use ExUnit.Case, async: false
 
-  alias Flatbuf.Codegen
-  alias Flatbuf.Schema.Resolver
+  alias Flatbuf.Test.CodegenCompiler
 
   @schema """
   namespace UnionTest;
@@ -32,16 +31,7 @@ defmodule Flatbuf.UnionRoundtripTest do
   root_type Hero;
   """
 
-  setup_all do
-    {:ok, schema} = Resolver.resolve_source(@schema)
-    artifacts = Codegen.generate(schema, wire_module: Flatbuf.UnionRoundtripTest.Wire)
-
-    for {_, src} <- artifacts do
-      Code.compile_string(src)
-    end
-
-    :ok
-  end
+  CodegenCompiler.compile_source!(@schema, wire_module: Flatbuf.UnionRoundtripTest.Wire)
 
   test "Sword variant round-trips" do
     value = %{name: "Alice", primary: {:Sword, %{dmg: 7}}}

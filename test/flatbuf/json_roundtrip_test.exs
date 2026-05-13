@@ -9,8 +9,7 @@ defmodule Flatbuf.JsonRoundtripTest do
 
   use ExUnit.Case, async: false
 
-  alias Flatbuf.Codegen
-  alias Flatbuf.Schema.Resolver
+  alias Flatbuf.Test.CodegenCompiler
 
   @schema """
   namespace Json;
@@ -35,16 +34,11 @@ defmodule Flatbuf.JsonRoundtripTest do
   root_type Hero;
   """
 
-  setup_all do
-    {:ok, schema} = Resolver.resolve_source(@schema)
-    artifacts = Codegen.generate(schema, wire_module: Flatbuf.JsonRoundtripTest.Wire)
-
-    for {_, src} <- artifacts do
-      Code.compile_string(src)
-    end
-
-    :ok
-  end
+  # Compile generated modules at test-file compile time, not in
+  # setup_all — that way references like `Json.Hero.encode/1` inside
+  # `test do ... end` blocks resolve cleanly instead of emitting
+  # `module is not available` warnings.
+  CodegenCompiler.compile_source!(@schema, wire_module: Flatbuf.JsonRoundtripTest.Wire)
 
   test "to_json/from_json round-trips a full Hero" do
     value = %{

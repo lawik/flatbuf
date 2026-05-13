@@ -9,8 +9,7 @@ defmodule Flatbuf.ArrayRoundtripTest do
 
   use ExUnit.Case, async: false
 
-  alias Flatbuf.Codegen
-  alias Flatbuf.Schema.Resolver
+  alias Flatbuf.Test.CodegenCompiler
 
   @schema """
   namespace ArrayTest;
@@ -32,16 +31,7 @@ defmodule Flatbuf.ArrayRoundtripTest do
   root_type Holder;
   """
 
-  setup_all do
-    {:ok, schema} = Resolver.resolve_source(@schema)
-    artifacts = Codegen.generate(schema, wire_module: Flatbuf.ArrayRoundtripTest.Wire)
-
-    for {_, src} <- artifacts do
-      Code.compile_string(src)
-    end
-
-    :ok
-  end
+  CodegenCompiler.compile_source!(@schema, wire_module: Flatbuf.ArrayRoundtripTest.Wire)
 
   test "fixed-size scalar array round-trips" do
     value = %{o: %{scalars: [10, 20, 30], inners: [%{a: 1, b: 2}, %{a: 3, b: 4}]}}

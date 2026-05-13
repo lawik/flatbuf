@@ -33,12 +33,21 @@ defmodule Flatbuf.Codegen.Union do
     from_json_clauses = build_from_json_clauses(u)
     verify_clauses = build_verify_clauses(u)
 
+    # Only string variants and struct-in-union variants use the Wire
+    # helper directly. Skip the alias otherwise to avoid an "unused
+    # alias" warning on table-only unions.
+    needs_wire? =
+      Enum.any?(u.variants, fn {_, type, _} ->
+        match?(:string, type) or match?({:struct, _}, type)
+      end)
+
+    wire_alias = if needs_wire?, do: "  alias #{inspect(wire_module)}, as: Wire\n", else: ""
+
     source = """
     defmodule #{module_name} do
       @moduledoc "Generated from FlatBuffers union #{u.name}. Do not edit."
 
-      alias #{inspect(wire_module)}, as: Wire
-
+    #{wire_alias}
       @type t :: #{type_spec}
 
       @doc "Integer discriminator for a variant atom (0 for :NONE)."
@@ -186,20 +195,23 @@ defmodule Flatbuf.Codegen.Union do
   defp build_verify_clauses(u) do
     u.variants
     |> Enum.map_join("", fn {_name, type, disc} ->
-      expr =
+      # Only the table variant recurses with `depth - 1`; struct and
+      # string variants ignore depth, so underscore it on those clauses
+      # to keep the compiler quiet.
+      {expr, depth_param} =
         case type do
           {:table, fqn} ->
-            "#{fqn_to_module(fqn)}.__verify_at__(buf, abs_pos, depth)"
+            {"#{fqn_to_module(fqn)}.__verify_at__(buf, abs_pos, depth)", "depth"}
 
-          # Inline struct (struct-in-union) — depth-independent bounds check.
           {:struct, fqn} ->
-            "Wire.verify_bounds(buf, abs_pos, #{fqn_to_module(fqn)}.__flatbuf__(:struct_size))"
+            {"Wire.verify_bounds(buf, abs_pos, #{fqn_to_module(fqn)}.__flatbuf__(:struct_size))",
+             "_depth"}
 
           :string ->
-            "Wire.verify_string_at(buf, abs_pos)"
+            {"Wire.verify_string_at(buf, abs_pos)", "_depth"}
         end
 
-      "  def __verify_variant__(buf, #{disc}, abs_pos, depth), do: #{expr}\n"
+      "  def __verify_variant__(buf, #{disc}, abs_pos, #{depth_param}), do: #{expr}\n"
     end)
   end
 
