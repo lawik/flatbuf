@@ -869,7 +869,7 @@ defmodule Flatbuf.Codegen.Table do
         {{:union_vec, types_var, var}, line}
 
       {:vector, inner} ->
-        line = build_vector_prelude(var, field_lookup, inner, schema)
+        line = build_vector_prelude(f, var, field_lookup, inner, schema)
         {var, line}
 
       {:table, fqn} ->
@@ -906,21 +906,43 @@ defmodule Flatbuf.Codegen.Table do
     end
   end
 
-  defp build_vector_prelude(var, field_lookup, inner, schema) do
+  defp force_align(%{attributes: attrs}) do
+    case Map.get(attrs, :force_align, 1) do
+      n when is_integer(n) and n >= 1 -> n
+      _ -> 1
+    end
+  end
+
+  defp force_align(_), do: 1
+
+  defp build_vector_prelude(f, var, field_lookup, inner, schema) do
+    # `(force_align: N)` on the vector field raises the element
+    # alignment to at least N, so the contiguous vector body starts
+    # at an N-aligned offset.
+    force = force_align(f)
+
     case inner do
       {:scalar, kind} ->
         sz = Schema.scalar_size(kind)
+        elem_align = max(sz, force)
 
         """
             {b, #{var}} =
               case #{field_lookup} do
                 nil -> {b, nil}
-                [] -> Wire.create_scalar_vector(b, [], #{sz}, #{sz}, &Wire.push_#{kind}/2)
-                list when is_list(list) -> Wire.create_scalar_vector(b, list, #{sz}, #{sz}, &Wire.push_#{kind}/2)
+                [] -> Wire.create_scalar_vector(b, [], #{sz}, #{elem_align}, &Wire.push_#{kind}/2)
+                list when is_list(list) -> Wire.create_scalar_vector(b, list, #{sz}, #{elem_align}, &Wire.push_#{kind}/2)
               end
         """
 
       :string ->
+        # Vectors of strings store uoffsets (4-byte elements). force
+        # alignment bumps the body-start alignment but the
+        # `create_offset_vector` helper hard-codes elem alignment to 4;
+        # for force_align > 4 we'd need a richer offset-vector helper.
+        # Common case is force_align <= 4, which is a no-op here.
+        _ = force
+
         """
             {b, #{var}} =
               case #{field_lookup} do
@@ -967,6 +989,7 @@ defmodule Flatbuf.Codegen.Table do
       {:enum, fqn} ->
         %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
         sz = Schema.scalar_size(u)
+        elem_align = max(sz, force)
         mod = fqn_to_module(fqn)
 
         """
@@ -977,12 +1000,13 @@ defmodule Flatbuf.Codegen.Table do
 
                 list when is_list(list) ->
                   ints = Enum.map(list, &#{mod}.value/1)
-                  Wire.create_scalar_vector(b, ints, #{sz}, #{sz}, &Wire.push_#{u}/2)
+                  Wire.create_scalar_vector(b, ints, #{sz}, #{elem_align}, &Wire.push_#{u}/2)
               end
         """
 
       {:struct, fqn} ->
         %SchemaStruct{size: sz, align: al} = Schema.fetch(schema, fqn)
+        elem_align = max(al, force)
         mod = fqn_to_module(fqn)
 
         """
@@ -993,13 +1017,13 @@ defmodule Flatbuf.Codegen.Table do
 
                 list when is_list(list) ->
                   count = length(list)
-                  b1 = Wire.start_vector(b, count, #{sz}, #{al})
+                  b1 = Wire.start_vector(b, count, #{sz}, #{elem_align})
 
                   b2 =
                     list
                     |> Enum.reverse()
                     |> Enum.reduce(b1, fn item, acc ->
-                      acc = Wire.align(acc, #{al})
+                      acc = Wire.align(acc, #{elem_align})
                       bin = #{mod}.encode(item)
                       %{acc | bytes: [bin | acc.bytes], size: acc.size + byte_size(bin)}
                     end)
