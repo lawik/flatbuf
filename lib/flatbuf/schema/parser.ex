@@ -243,9 +243,10 @@ defmodule Flatbuf.Schema.Parser do
 
     case val do
       {:int, n} -> {{:int, -n}, rest2}
-      {:float, f} -> {{:float, -f}, rest2}
-      {:ident, "inf"} -> {{:float, :neg_infinity}, rest2}
-      {:ident, "nan"} -> {{:float, :nan}, rest2}
+      {:float, :infinity} -> {{:float, :neg_infinity}, rest2}
+      {:float, :neg_infinity} -> {{:float, :infinity}, rest2}
+      {:float, :nan} -> {{:float, :nan}, rest2}
+      {:float, f} when is_float(f) -> {{:float, -f}, rest2}
       _ -> throw({:parse_error, {:bad_negative_literal, val}})
     end
   end

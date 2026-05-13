@@ -37,14 +37,14 @@ defmodule Flatbuf.Schema.Resolver do
     abs = Path.expand(path)
 
     case load_all(abs, %{}, []) do
-      {:ok, loaded} -> normalize(loaded)
+      {:ok, _seen, loaded} -> normalize(loaded)
       {:error, _} = err -> err
     end
   end
 
   defp load_all(path, seen, acc) do
     if Map.has_key?(seen, path) do
-      {:ok, acc}
+      {:ok, seen, acc}
     else
       with {:ok, src} <- read_file(path),
            {:ok, decls} <- Parser.parse(src) do
@@ -62,14 +62,13 @@ defmodule Flatbuf.Schema.Resolver do
     end
   end
 
-  defp load_includes([], _base, _seen, acc), do: {:ok, acc}
+  defp load_includes([], _base, seen, acc), do: {:ok, seen, acc}
 
   defp load_includes([{:include, rel, _line} | rest], base, seen, acc) do
     full = Path.expand(Path.join(base, rel))
 
     case load_all(full, seen, acc) do
-      {:ok, acc2} ->
-        seen2 = Map.put(seen, full, true)
+      {:ok, seen2, acc2} ->
         load_includes(rest, base, seen2, acc2)
 
       err ->

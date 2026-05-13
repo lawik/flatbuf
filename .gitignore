@@ -22,3 +22,7 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 flatbuf-*.tar
 
+# Upstream FlatBuffers test corpus, pulled by mix flatbuf.fetch_fixtures.
+# Pinned via FLATBUFFERS_TAG in lib/mix/tasks/flatbuf.fetch_fixtures.ex.
+/test/fixtures/upstream/
+
