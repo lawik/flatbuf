@@ -30,14 +30,33 @@ defmodule Flatbuf.Test.Upstream do
   @doc """
   Run our parser+resolver on a single upstream schema and return a
   normalized outcome term suitable for comparison against the manifest.
+
+  The include paths mirror what upstream's CMake/Bazel feeds flatc:
+  the corpus root and the `include_test` subdir (and its `sub/`) so
+  schemas like `monster_test.fbs` can resolve their relative includes.
   """
   def run_schema(relative_path) do
     abs = Path.join(tests_root(), relative_path)
 
-    case Flatbuf.Schema.Resolver.resolve_path(abs) do
+    case Flatbuf.Schema.Resolver.resolve_path(abs, include_paths: include_paths()) do
       {:ok, _schema} -> :ok
       {:error, reason} -> {:error, normalize_error(reason)}
     end
+  end
+
+  @doc "Include search paths used for conformance runs."
+  def include_paths do
+    root = tests_root()
+    upstream_root = Path.dirname(root)
+
+    [
+      root,
+      upstream_root,
+      Path.join(root, "include_test"),
+      Path.join(root, "include_test/sub"),
+      Path.join(root, "prototest"),
+      Path.join(root, "flatc")
+    ]
   end
 
   @doc """

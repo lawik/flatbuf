@@ -32,18 +32,26 @@ defmodule Flatbuf.Schema.Resolver do
 
   @doc """
   Resolve a `.fbs` file from disk, following `include` statements recursively.
-  """
-  @spec resolve_path(Path.t()) :: {:ok, Schema.t()} | {:error, term()}
-  def resolve_path(path) do
-    abs = Path.expand(path)
 
-    case load_all(abs, %{}, []) do
+  Options:
+
+    * `:include_paths` — list of additional directories to search for
+      included files. Mirrors flatc's `-I PATH` flag. The directory of
+      the *including* file is always tried first; the search paths are
+      tried in order if that fails.
+  """
+  @spec resolve_path(Path.t(), keyword()) :: {:ok, Schema.t()} | {:error, term()}
+  def resolve_path(path, opts \\ []) do
+    abs = Path.expand(path)
+    include_paths = Keyword.get(opts, :include_paths, []) |> Enum.map(&Path.expand/1)
+
+    case load_all(abs, include_paths, %{}, []) do
       {:ok, _seen, loaded} -> normalize(loaded)
       {:error, _} = err -> err
     end
   end
 
-  defp load_all(path, seen, acc) do
+  defp load_all(path, include_paths, seen, acc) do
     if Map.has_key?(seen, path) do
       {:ok, seen, acc}
     else
@@ -51,7 +59,7 @@ defmodule Flatbuf.Schema.Resolver do
            {:ok, decls} <- Parser.parse(src) do
         seen2 = Map.put(seen, path, true)
         acc2 = acc ++ [{path, decls}]
-        load_includes(decls, Path.dirname(path), seen2, acc2)
+        load_includes(decls, Path.dirname(path), include_paths, seen2, acc2)
       end
     end
   end
@@ -63,22 +71,39 @@ defmodule Flatbuf.Schema.Resolver do
     end
   end
 
-  defp load_includes([], _base, seen, acc), do: {:ok, seen, acc}
+  defp load_includes([], _base, _ip, seen, acc), do: {:ok, seen, acc}
 
-  defp load_includes([{:include, rel, _line} | rest], base, seen, acc) do
-    full = Path.expand(Path.join(base, rel))
+  defp load_includes([{:include, rel, _line} | rest], base, include_paths, seen, acc) do
+    case resolve_include(rel, base, include_paths) do
+      {:ok, full} ->
+        case load_all(full, include_paths, seen, acc) do
+          {:ok, seen2, acc2} ->
+            load_includes(rest, base, include_paths, seen2, acc2)
 
-    case load_all(full, seen, acc) do
-      {:ok, seen2, acc2} ->
-        load_includes(rest, base, seen2, acc2)
+          err ->
+            err
+        end
 
-      err ->
-        err
+      :not_found ->
+        {:error, {:cannot_read, rel, :enoent}}
     end
   end
 
-  defp load_includes([_ | rest], base, seen, acc),
-    do: load_includes(rest, base, seen, acc)
+  defp load_includes([_ | rest], base, include_paths, seen, acc),
+    do: load_includes(rest, base, include_paths, seen, acc)
+
+  # First try the including file's own directory (standard flatc behaviour),
+  # then each `-I` search path in order.
+  defp resolve_include(rel, base, include_paths) do
+    candidates = [
+      Path.expand(Path.join(base, rel)) | Enum.map(include_paths, &Path.join(&1, rel))
+    ]
+
+    case Enum.find(candidates, &File.regular?/1) do
+      nil -> :not_found
+      path -> {:ok, path}
+    end
+  end
 
   # Normalize per-file declarations into a Schema --------------------------
 
@@ -309,16 +334,7 @@ defmodule Flatbuf.Schema.Resolver do
   defp resolve_type(other, _ns, _schema), do: other
 
   defp lookup_name(name, ns, schema) do
-    candidates =
-      case ns do
-        nil -> [name]
-        _ -> [ns <> "." <> name, name]
-      end
-
-    found =
-      Enum.find(candidates, fn cand ->
-        Map.has_key?(schema.types, cand)
-      end)
+    found = Enum.find(enumerate_candidates(name, ns), &Map.has_key?(schema.types, &1))
 
     cond do
       found ->
@@ -330,6 +346,23 @@ defmodule Flatbuf.Schema.Resolver do
       true ->
         throw({:resolve_error, {:unknown_type, name}})
     end
+  end
+
+  # Reference lookup walks up the namespace hierarchy: for `foo.bar.X`
+  # we try `foo.bar.X`, then `foo.X`, then `X`. Matches flatc semantics
+  # so schemas like monster_test.fbs can refer to a type defined in
+  # an outer namespace without re-qualifying it.
+  defp enumerate_candidates(name, nil), do: [name]
+
+  defp enumerate_candidates(name, ns) do
+    parts = String.split(ns, ".")
+
+    prefixed =
+      for i <- length(parts)..1//-1 do
+        Enum.take(parts, i) |> Enum.join(".") |> Kernel.<>("." <> name)
+      end
+
+    prefixed ++ [name]
   end
 
   defp assign_slots(%Table{fields: fields} = t) do

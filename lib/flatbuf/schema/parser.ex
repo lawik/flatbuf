@@ -137,6 +137,14 @@ defmodule Flatbuf.Schema.Parser do
     parse_file(rest2, [], [decl | acc])
   end
 
+  # `native_include "header";` — a C++/codegen-target hint we don't
+  # consume but mustn't choke on. Parse and discard.
+  defp parse_file([{:ident, "native_include", _line} | rest], _pending_docs, acc) do
+    {_path, rest2} = expect_string(rest, "native_include path")
+    rest3 = expect_punct(rest2, :semi)
+    parse_file(rest3, [], acc)
+  end
+
   defp parse_file([tok | _rest], _pending_docs, _acc) do
     throw({:parse_error, {:unexpected_token, tok}})
   end
@@ -198,7 +206,16 @@ defmodule Flatbuf.Schema.Parser do
     {{:vector, inner}, rest3}
   end
 
-  defp parse_type_ref([{:ident, name, _} | rest]) do
+  defp parse_type_ref([{:ident, name, _} | rest]), do: type_ref_for_name(name, rest)
+  defp parse_type_ref([{:kw, kw, _} | rest]), do: type_ref_for_name(Atom.to_string(kw), rest)
+
+  defp parse_type_ref([tok | _]),
+    do: throw({:parse_error, {:expected_type_ref, tok}})
+
+  defp parse_type_ref([]),
+    do: throw({:parse_error, :unexpected_eof_in_type_ref})
+
+  defp type_ref_for_name(name, rest) do
     case Map.fetch(@scalar_types, name) do
       {:ok, :string} ->
         {:string, rest}
@@ -207,7 +224,6 @@ defmodule Flatbuf.Schema.Parser do
         {{:scalar, scalar}, rest}
 
       :error ->
-        # User type reference; may be dotted
         case rest do
           [{:punct, :dot, _} | _] ->
             {full, rest2} = continue_dotted(rest, name)
@@ -218,12 +234,6 @@ defmodule Flatbuf.Schema.Parser do
         end
     end
   end
-
-  defp parse_type_ref([tok | _]),
-    do: throw({:parse_error, {:expected_type_ref, tok}})
-
-  defp parse_type_ref([]),
-    do: throw({:parse_error, :unexpected_eof_in_type_ref})
 
   defp continue_dotted([{:punct, :dot, _} | rest], acc) do
     {next, rest2} = expect_ident(rest, "dotted name part")
@@ -537,6 +547,13 @@ defmodule Flatbuf.Schema.Parser do
   # Token helpers ---------------------------------------------------------
 
   defp expect_ident([{:ident, name, _} | rest], _context), do: {name, rest}
+
+  # Reserved words show up as `:kw` tokens, but in identifier positions
+  # (field names, type names, namespace parts, etc.) flatc accepts them
+  # verbatim. We do the same — the top-level dispatch is what
+  # distinguishes a `table` declaration from a field named `table`.
+  defp expect_ident([{:kw, kw, _} | rest], _context),
+    do: {Atom.to_string(kw), rest}
 
   defp expect_ident([tok | _], context),
     do: throw({:parse_error, {:expected_ident, context, tok}})

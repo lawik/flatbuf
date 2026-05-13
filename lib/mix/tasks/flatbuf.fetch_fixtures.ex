@@ -60,7 +60,10 @@ defmodule Mix.Tasks.Flatbuf.FetchFixtures do
 
     Mix.shell().info("flatbuf.fetch_fixtures: cloning #{@repo} @ #{@tag}")
     run_git!(args, ".")
-    run_git!(["sparse-checkout", "set", "tests"], @dest)
+    # `tests/` is the conformance corpus; `reflection/` provides the
+    # reflection.fbs schema that some upstream tests transitively
+    # include.
+    run_git!(["sparse-checkout", "set", "tests", "reflection"], @dest)
     Mix.shell().info("flatbuf.fetch_fixtures: ready at #{@dest}")
   end
 
