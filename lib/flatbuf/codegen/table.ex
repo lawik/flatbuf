@@ -722,6 +722,25 @@ defmodule Flatbuf.Codegen.Table do
   # Required fields fail-fast at the top of `build/2`. Throwing a known
   # tag here is what `encode/1` catches above to translate the failure
   # into an `{:error, _}` return tuple.
+  # Emit an `Enum.sort_by` expression for a list of `fqn` table
+  # structs, sorted by the table's `(key)` field. If `fqn` has no key
+  # field, the list is left as-is (no-op).
+  defp sort_by_key_step(fqn, schema) do
+    case Schema.fetch(schema, fqn) do
+      %Table{fields: fields} ->
+        case Enum.find(fields, fn f -> Map.get(f.attributes, :key, false) end) do
+          nil ->
+            "list"
+
+          %{name: key_name} ->
+            "Enum.sort_by(list, fn item -> Map.get(item, #{inspect(key_name)}) end)"
+        end
+
+      _ ->
+        "list"
+    end
+  end
+
   defp build_required_check(%Table{fields: fields}) do
     required =
       Enum.filter(fields, fn f ->
@@ -911,6 +930,12 @@ defmodule Flatbuf.Codegen.Table do
         """
 
       {:table, fqn} ->
+        # If the inner table has a `(key)` field, sort the list by
+        # that field's value before writing — so the wire order is
+        # ascending by key and `find_<field>_by_<key>/3` (which does
+        # a binary search) actually finds matches.
+        sort_step = sort_by_key_step(fqn, schema)
+
         """
             {b, #{var}} =
               case #{field_lookup} do
@@ -918,6 +943,8 @@ defmodule Flatbuf.Codegen.Table do
                   {b, nil}
 
                 list when is_list(list) ->
+                  list = #{sort_step}
+
                   {addrs, b} =
                     Enum.map_reduce(list, b, fn item, acc ->
                       {acc2, a} = #{fqn_to_module(fqn)}.build(acc, item)

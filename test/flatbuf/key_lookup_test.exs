@@ -41,11 +41,13 @@ defmodule Flatbuf.KeyLookupTest do
 
   describe "numeric key lookup" do
     test "find_stats_by_count/3 returns the matching entry" do
+      # Intentionally unsorted — the encoder sorts by `(key)` before
+      # writing so the binary search reader finds matches anyway.
       stats = [
+        %{id: "delta", val: 400, count: 99},
         %{id: "alpha", val: 100, count: 1},
-        %{id: "beta", val: 200, count: 5},
         %{id: "gamma", val: 300, count: 10},
-        %{id: "delta", val: 400, count: 99}
+        %{id: "beta", val: 200, count: 5}
       ]
 
       {:ok, bin} = KeyTest.Group.encode(%{stats: stats})
@@ -79,11 +81,11 @@ defmodule Flatbuf.KeyLookupTest do
 
   describe "string key lookup" do
     test "find_named_by_name/3 returns the matching entry" do
-      # Must be sorted ascending by name.
+      # Unsorted — encoder sorts before writing.
       named = [
+        %{name: "cherry", score: 3},
         %{name: "apple", score: 1},
-        %{name: "banana", score: 2},
-        %{name: "cherry", score: 3}
+        %{name: "banana", score: 2}
       ]
 
       {:ok, bin} = KeyTest.Group.encode(%{named: named})
