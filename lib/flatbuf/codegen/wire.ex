@@ -352,7 +352,8 @@ defmodule Flatbuf.Codegen.Wire do
               size: non_neg_integer(),
               minalign: pos_integer(),
               current_object: nil | %{start_size: non_neg_integer(), slots: [{pos_integer(), non_neg_integer()}]},
-              string_cache: %{optional(binary()) => non_neg_integer()}
+              string_cache: %{optional(binary()) => non_neg_integer()},
+              vtables: %{optional(binary()) => non_neg_integer()}
             }
 
       defstruct bytes: [],
@@ -364,7 +365,14 @@ defmodule Flatbuf.Codegen.Wire do
                 # writing the same bytes twice. Set only by
                 # `create_shared_string/2`; regular `create_string/2`
                 # never consults or touches it.
-                string_cache: %{}
+                string_cache: %{},
+                # Cache of already-written vtables: `vt_bin → vt_addr`.
+                # `end_table/1` checks for an identical vtable before
+                # writing a fresh one; on a hit, the table's soffset
+                # references the existing vtable and we skip duplicate
+                # vtable bytes. Per the FlatBuffers spec, vtables are
+                # deduplicated across a buffer.
+                vtables: %{}
     end
 
     @doc "Create a new builder."
@@ -557,6 +565,13 @@ defmodule Flatbuf.Codegen.Wire do
     @doc "Begin a table. The matching `end_table/1` finalizes it."
     def start_table(b) do
       if b.current_object != nil, do: raise(ArgumentError, "table already in progress")
+      # Align to uoffset_t up front so the inline area has the same
+      # leading-pad shape across instances of the same table type.
+      # Without this, two tables with identical field sets can end up
+      # with different `table_object_size` values in their vtables
+      # (because one started 4-aligned and the other started off by
+      # 2 bytes), defeating vtable dedup.
+      b = align(b, 4)
       %{b | current_object: %{start_size: b.size, slots: []}}
     end
 
@@ -652,18 +667,47 @@ defmodule Flatbuf.Codegen.Wire do
           entries
         ])
 
-      v_addr = s_addr + max_voffset
-      soffset_value = v_addr - s_addr
+      # Per the FlatBuffers spec, identical vtables are deduplicated.
+      # If we've already emitted a vtable with these bytes earlier in
+      # the buffer, reuse its addr — the table's soffset becomes
+      # (existing_vt_addr - s_addr), which is positive because the
+      # existing vtable was pushed before, i.e. has a smaller addr…
+      # wait, that's backwards: a previously-pushed vtable has *higher*
+      # addr (size grew since). So actually the previously-pushed
+      # vtable has addr > s_addr (it was pushed later in our build
+      # order). Hmm no — earlier pushes have *smaller* addrs in our
+      # convention (addr = size *after* push). A previously-emitted
+      # vtable has addr ≤ s_addr - 4 (since we just pushed at least
+      # the soffset). soffset is signed: it's `table_pos - vt_pos`
+      # in the final buffer, which is `(final_size - s_addr) -
+      # (final_size - existing_v_addr) = existing_v_addr - s_addr`.
+      # Since existing_v_addr was pushed earlier, it's *smaller* than
+      # s_addr → soffset is negative. The reader does
+      # `vt_pos = table_pos - soffset`, so a negative soffset means
+      # the vtable is *forward* of the table in the final buffer,
+      # which lines up with: earlier-pushed vtable is at a higher
+      # final position.
+      case Map.fetch(b.vtables, vt_bin) do
+        {:ok, existing_v_addr} ->
+          # Reuse: only push the soffset_t.
+          soffset_value = existing_v_addr - s_addr
+          b = push_raw(b, <<soffset_value::little-signed-32>>)
+          {%{b | current_object: nil}, s_addr}
 
-      b = push_raw(b, <<soffset_value::little-signed-32>>)
+        :error ->
+          # Fresh vtable: push soffset first, then the vtable bytes.
+          v_addr = s_addr + max_voffset
+          soffset_value = v_addr - s_addr
 
-      b =
-        b
-        |> Map.update!(:minalign, &max(&1, 2))
-        |> push_raw(vt_bin)
+          b = push_raw(b, <<soffset_value::little-signed-32>>)
 
-      _ = v_addr
-      {%{b | current_object: nil}, s_addr}
+          b =
+            b
+            |> Map.update!(:minalign, &max(&1, 2))
+            |> push_raw(vt_bin)
+
+          {%{b | current_object: nil, vtables: Map.put(b.vtables, vt_bin, v_addr)}, s_addr}
+      end
     end
 
     # ---------------------------------------------------------------------
