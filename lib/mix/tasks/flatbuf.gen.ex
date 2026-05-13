@@ -6,6 +6,7 @@ defmodule Mix.Tasks.Flatbuf.Gen do
 
       mix flatbuf.gen SCHEMA.fbs [SCHEMA.fbs ...] [--out PATH] [--wire-module NAME]
                                  [--namespace NAME] [--include PATH]
+                                 [--niceties PROTO,PROTO ...]
                                  [--force]
 
   Each schema is parsed and resolved, then turned into a set of `.ex` files
@@ -25,13 +26,16 @@ defmodule Mix.Tasks.Flatbuf.Gen do
     * `--include PATH` — additional directory to search for `include`
       files (the schema's own directory is always searched first).
       Repeatable.
+    * `--niceties LIST` — comma-separated opt-in protocols/behaviours
+      to wire into generated tables. Currently supported:
+      `behaviour` (implements `Flatbuf.Table`), `jason`
+      (derives `Jason.Encoder`).
     * `--force` — overwrite outputs even when their content is unchanged.
   """
 
   use Mix.Task
 
-  alias Flatbuf.Codegen
-  alias Flatbuf.Schema.Resolver
+  alias Flatbuf.Gen
 
   @impl Mix.Task
   def run(argv) do
@@ -42,6 +46,7 @@ defmodule Mix.Tasks.Flatbuf.Gen do
           wire_module: :string,
           namespace: :string,
           include: :keep,
+          niceties: :string,
           force: :boolean
         ]
       )
@@ -50,75 +55,52 @@ defmodule Mix.Tasks.Flatbuf.Gen do
       Mix.raise("flatbuf.gen: no schema files given")
     end
 
-    out_dir = Keyword.get(opts, :out, "lib")
-    wire_module = parse_module_name(opts[:wire_module] || "Flatbuf.Generated.Wire")
-    namespace = opts[:namespace]
-    include_paths = Keyword.get_values(opts, :include)
+    plan_opts = [
+      out: Keyword.get(opts, :out, "lib"),
+      wire_module: opts[:wire_module] || "Flatbuf.Generated.Wire",
+      namespace: opts[:namespace],
+      include: Keyword.get_values(opts, :include),
+      niceties: parse_niceties(opts[:niceties])
+    ]
+
     force? = Keyword.get(opts, :force, false)
+    out_dir = plan_opts[:out]
 
-    schemas =
-      Enum.map(paths, fn p ->
-        case Resolver.resolve_path(p, include_paths: include_paths) do
-          {:ok, schema} -> schema
-          {:error, reason} -> Mix.raise("flatbuf.gen: #{p}: #{inspect(reason)}")
-        end
-      end)
+    case Gen.plan(paths, plan_opts) do
+      {:ok, artifacts} ->
+        File.mkdir_p!(out_dir)
 
-    codegen_opts = [wire_module: wire_module, namespace: namespace]
+        for %{path: path, source: source} <- artifacts do
+          File.mkdir_p!(Path.dirname(path))
 
-    artifacts =
-      schemas
-      |> Enum.flat_map(&Codegen.generate(&1, codegen_opts))
-      |> Enum.uniq_by(&elem(&1, 0))
+          write? =
+            cond do
+              force? -> true
+              !File.exists?(path) -> true
+              File.read!(path) != source -> true
+              true -> false
+            end
 
-    File.mkdir_p!(out_dir)
-
-    written =
-      for {module, source} <- artifacts do
-        path = output_path(out_dir, module)
-        File.mkdir_p!(Path.dirname(path))
-
-        write? =
-          cond do
-            force? -> true
-            !File.exists?(path) -> true
-            File.read!(path) != source -> true
-            true -> false
+          if write? do
+            File.write!(path, source)
+            Mix.shell().info("* writing #{Path.relative_to_cwd(path)}")
+          else
+            Mix.shell().info("  unchanged #{Path.relative_to_cwd(path)}")
           end
-
-        if write? do
-          File.write!(path, source)
-          {:created, path}
-        else
-          {:unchanged, path}
-        end
-      end
-
-    for {status, path} <- written do
-      tag =
-        case status do
-          :created -> "* writing"
-          :unchanged -> "  unchanged"
         end
 
-      Mix.shell().info("#{tag} #{Path.relative_to_cwd(path)}")
+        :ok
+
+      {:error, {path, reason}} ->
+        Mix.raise("flatbuf.gen: #{path}: #{inspect(reason)}")
     end
-
-    :ok
   end
 
-  defp parse_module_name(name) when is_binary(name) do
-    name |> String.split(".") |> Module.concat()
-  end
+  defp parse_niceties(nil), do: []
 
-  defp output_path(out_dir, module) do
-    relative =
-      module
-      |> Module.split()
-      |> Enum.map(&Macro.underscore/1)
-      |> Path.join()
-      |> Kernel.<>(".ex")
-
-    Path.join(out_dir, relative)
+  defp parse_niceties(str) when is_binary(str) do
+    str
+    |> String.split(",", trim: true)
+    |> Enum.map(&(&1 |> String.trim() |> String.to_atom()))
   end
 end
