@@ -42,6 +42,17 @@ defmodule Flatbuf.MonsterDifferentialTest do
       :ok
     end
 
+    test "verify(monsterdata_test.mon) accepts the upstream buffer" do
+      bin = File.read!(@binary_path)
+      assert :ok = MyGame.Example.Monster.verify(bin)
+    end
+
+    test "verify rejects a truncated upstream buffer" do
+      bin = File.read!(@binary_path)
+      truncated = binary_part(bin, 0, div(byte_size(bin), 2))
+      assert {:error, _} = MyGame.Example.Monster.verify(truncated)
+    end
+
     test "decode(monsterdata_test.mon) recovers the expected Monster" do
       bin = File.read!(@binary_path)
       {:ok, decoded} = MyGame.Example.Monster.decode(bin)

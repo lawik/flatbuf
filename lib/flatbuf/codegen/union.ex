@@ -31,6 +31,7 @@ defmodule Flatbuf.Codegen.Union do
     build_clauses = build_build_clauses(u, schema)
     to_json_clauses = build_to_json_clauses(u)
     from_json_clauses = build_from_json_clauses(u)
+    verify_clauses = build_verify_clauses(u)
 
     source = """
     defmodule #{module_name} do
@@ -78,7 +79,11 @@ defmodule Flatbuf.Codegen.Union do
       @doc false
       def __from_json__(nil, _value), do: nil
       def __from_json__("NONE", _value), do: nil
-    #{from_json_clauses}end
+    #{from_json_clauses}
+      @doc false
+      def __verify_variant__(_buf, 0, _abs_pos, _depth), do: :ok
+    #{verify_clauses}  def __verify_variant__(_buf, disc, _abs_pos, _depth), do: {:error, {:unknown_union_variant, disc}}
+    end
     """
 
     {module_atom, source}
@@ -175,6 +180,26 @@ defmodule Flatbuf.Codegen.Union do
         end
 
       "  def __from_json__(#{inspect(Atom.to_string(name))}, value), do: #{expr}\n"
+    end)
+  end
+
+  defp build_verify_clauses(u) do
+    u.variants
+    |> Enum.map_join("", fn {_name, type, disc} ->
+      expr =
+        case type do
+          {:table, fqn} ->
+            "#{fqn_to_module(fqn)}.__verify_at__(buf, abs_pos, depth)"
+
+          # Inline struct (struct-in-union) — depth-independent bounds check.
+          {:struct, fqn} ->
+            "Wire.verify_bounds(buf, abs_pos, #{fqn_to_module(fqn)}.__flatbuf__(:struct_size))"
+
+          :string ->
+            "Wire.verify_string_at(buf, abs_pos)"
+        end
+
+      "  def __verify_variant__(buf, #{disc}, abs_pos, depth), do: #{expr}\n"
     end)
   end
 

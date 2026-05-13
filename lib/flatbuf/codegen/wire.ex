@@ -115,6 +115,101 @@ defmodule Flatbuf.Codegen.Wire do
     def vector_elem_pos(pos, i, elem_size), do: pos + 4 + i * elem_size
 
     # ---------------------------------------------------------------------
+    # Verifier primitives — used by generated `verify/1` to bounds-check
+    # every offset before the reader follows it. Returning `:ok` or
+    # `{:error, reason}` (no exceptions) keeps the verifier predictable
+    # in the face of malicious input.
+    # ---------------------------------------------------------------------
+
+    @doc "Check that `buf` is at least `n` bytes long."
+    def verify_size(buf, n) when is_binary(buf) and is_integer(n) do
+      if byte_size(buf) >= n, do: :ok, else: {:error, {:buffer_too_small, n}}
+    end
+
+    @doc "Check that `[off, off+len)` is inside `buf`."
+    def verify_bounds(buf, off, len) do
+      cond do
+        off < 0 -> {:error, {:negative_offset, off}}
+        len < 0 -> {:error, {:negative_length, len}}
+        off + len > byte_size(buf) -> {:error, {:out_of_bounds, off, len}}
+        true -> :ok
+      end
+    end
+
+    @doc """
+    Read a uoffset_t at `pos` and return `{:ok, target_pos}` if the
+    target is within the buffer, `{:error, reason}` otherwise.
+    """
+    def verify_follow_uoffset(buf, pos) do
+      with :ok <- verify_bounds(buf, pos, 4) do
+        target = pos + read_u32(buf, pos)
+
+        cond do
+          target < 0 -> {:error, {:bad_uoffset, pos, target}}
+          target >= byte_size(buf) -> {:error, {:bad_uoffset, pos, target}}
+          true -> {:ok, target}
+        end
+      end
+    end
+
+    @doc """
+    Verify a length-prefixed string at `pos` (where the u32 length
+    lives). Checks the length, that the bytes fit, and that the null
+    terminator is present.
+    """
+    def verify_string_at(buf, pos) do
+      with :ok <- verify_bounds(buf, pos, 4),
+           len = read_u32(buf, pos),
+           :ok <- verify_bounds(buf, pos + 4, len + 1) do
+        if :binary.at(buf, pos + 4 + len) == 0,
+          do: :ok,
+          else: {:error, {:missing_null_terminator, pos}}
+      end
+    end
+
+    @doc """
+    Verify a vector of `elem_size`-byte elements at `pos`. Returns
+    `{:ok, count}` on success.
+    """
+    def verify_vector_at(buf, pos, elem_size) do
+      with :ok <- verify_bounds(buf, pos, 4),
+           count = read_u32(buf, pos),
+           :ok <- verify_bounds(buf, pos + 4, count * elem_size) do
+        {:ok, count}
+      end
+    end
+
+    @doc """
+    Verify a table header at `table_pos`. Returns
+    `{:ok, vt_size, inline_size}` so the caller can iterate slots.
+    """
+    def verify_table_header(buf, table_pos) do
+      with :ok <- verify_bounds(buf, table_pos, 4) do
+        soffset = read_i32(buf, table_pos)
+        vt_pos = table_pos - soffset
+
+        with :ok <- verify_bounds(buf, vt_pos, 4) do
+          vt_size = read_u16(buf, vt_pos)
+          inline_size = read_u16(buf, vt_pos + 2)
+
+          cond do
+            vt_size < 4 ->
+              {:error, {:bad_vtable_size, vt_pos, vt_size}}
+
+            rem(vt_size, 2) != 0 ->
+              {:error, {:bad_vtable_size, vt_pos, vt_size}}
+
+            true ->
+              with :ok <- verify_bounds(buf, vt_pos, vt_size),
+                   :ok <- verify_bounds(buf, table_pos, inline_size) do
+                {:ok, vt_pos, vt_size, inline_size}
+              end
+          end
+        end
+      end
+    end
+
+    # ---------------------------------------------------------------------
     # Builder
     # ---------------------------------------------------------------------
 

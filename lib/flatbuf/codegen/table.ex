@@ -32,6 +32,8 @@ defmodule Flatbuf.Codegen.Table do
     to_json_map_body = build_to_json_map(t, schema)
     from_json_map_body = build_from_json_map(t, schema)
     json_top = build_json_top(is_root?)
+    verify_body = build_verify_at(t, schema)
+    verify_top = build_verify_top(is_root?)
 
     source = """
     defmodule #{module_name} do
@@ -64,6 +66,14 @@ defmodule Flatbuf.Codegen.Table do
       def __from_json_map__(map) when is_map(map) do
         %__MODULE__{
     #{from_json_map_body}    }
+      end
+    #{verify_top}
+      @doc false
+      def __verify_at__(_buf, _pos, 0), do: {:error, :depth_exceeded}
+
+      def __verify_at__(buf, pos, depth) do
+        with {:ok, _vt_pos, _vt_size, _inline_size} <- Wire.verify_table_header(buf, pos) do
+    #{verify_body}    end
       end
 
     #{accessor_funs}end
@@ -383,6 +393,32 @@ defmodule Flatbuf.Codegen.Table do
     end
   end
 
+  defp build_verify_top(is_root?) do
+    if is_root? do
+      """
+
+        @doc \"\"\"
+        Structurally verify a buffer claimed to be this table.
+
+        Checks every offset is within the buffer, vtables are well-formed,
+        strings have their null terminator, vectors don't claim to extend
+        past the buffer, and sub-tables are recursively verified to a
+        depth of 64. Returns `:ok` on success, `{:error, reason}` on the
+        first problem encountered.
+        \"\"\"
+        @spec verify(binary()) :: :ok | {:error, term()}
+        def verify(buf) when is_binary(buf) do
+          with :ok <- Wire.verify_size(buf, 4),
+               {:ok, root_pos} <- Wire.verify_follow_uoffset(buf, 0) do
+            __verify_at__(buf, root_pos, 64)
+          end
+        end
+      """
+    else
+      ""
+    end
+  end
+
   # -----------------------------------------------------------------------
   # Encode (build into existing builder)
   # -----------------------------------------------------------------------
@@ -672,6 +708,158 @@ defmodule Flatbuf.Codegen.Table do
   # NaN/Infinity default literals — emit them as atoms; the wire helper
   # writes the IEEE 754 bit pattern when these come through push_f32/f64.
   defp literal_for_scalar(atom, _kind) when atom in [:nan, :infinity, :neg_infinity], do: atom
+
+  # -----------------------------------------------------------------------
+  # Verifier
+  # -----------------------------------------------------------------------
+
+  defp build_verify_at(t, schema) do
+    clauses =
+      t.fields
+      |> Enum.map(fn f -> verify_field(f, schema) end)
+      |> Enum.reject(&(&1 == ""))
+
+    case clauses do
+      [] ->
+        "      :ok\n"
+
+      _ ->
+        joined = clauses |> Enum.map(&String.trim/1) |> Enum.join(",\n         ")
+
+        """
+              with #{joined} do
+                :ok
+              end
+        """
+    end
+  end
+
+  defp verify_field(f, schema) do
+    case f.type do
+      {:scalar, _} ->
+        # Scalars live inline in the table; the vtable header check
+        # already bounded the inline area, so no extra work needed.
+        ""
+
+      {:enum, _} ->
+        ""
+
+      {:struct, _} ->
+        # Inline struct — bounded by inline_size.
+        ""
+
+      :string ->
+        """
+        :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                  0 -> :ok
+                  o ->
+                    case Wire.verify_follow_uoffset(buf, pos + o) do
+                      {:ok, abs_pos} -> Wire.verify_string_at(buf, abs_pos)
+                      err -> err
+                    end
+                end)
+        """
+
+      {:vector, inner} ->
+        verify_vector_field(f, inner, schema)
+
+      {:table, fqn} ->
+        mod = fqn_to_module(fqn)
+
+        """
+        :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                  0 -> :ok
+                  o ->
+                    case Wire.verify_follow_uoffset(buf, pos + o) do
+                      {:ok, abs_pos} -> #{mod}.__verify_at__(buf, abs_pos, depth - 1)
+                      err -> err
+                    end
+                end)
+        """
+
+      {:union, fqn} ->
+        mod = fqn_to_module(fqn)
+        disc_slot = f.vtable_slot - 2
+
+        """
+        :ok <- (case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
+                  0 -> :ok
+                  type_o ->
+                    with :ok <- Wire.verify_bounds(buf, pos + type_o, 1) do
+                      case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                        0 -> :ok
+                        value_o ->
+                          case Wire.verify_follow_uoffset(buf, pos + value_o) do
+                            {:ok, abs_pos} ->
+                              disc = Wire.read_u8(buf, pos + type_o)
+                              #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1)
+                            err -> err
+                          end
+                      end
+                    end
+                end)
+        """
+    end
+  end
+
+  defp verify_vector_field(f, inner, schema) do
+    {elem_size, elem_verifier} = vector_elem_verify(inner, schema)
+
+    """
+    :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+              0 -> :ok
+              o ->
+                case Wire.verify_follow_uoffset(buf, pos + o) do
+                  {:ok, vec_pos} ->
+                    case Wire.verify_vector_at(buf, vec_pos, #{elem_size}) do
+                      {:ok, count} when count == 0 -> :ok
+                      {:ok, count} ->
+                        Enum.reduce_while(0..(count - 1), :ok, fn i, _acc ->
+                          elem_pos = Wire.vector_elem_pos(vec_pos, i, #{elem_size})
+                          case #{elem_verifier} do
+                            :ok -> {:cont, :ok}
+                            err -> {:halt, err}
+                          end
+                        end)
+                      err -> err
+                    end
+                  err -> err
+                end
+            end)
+    """
+  end
+
+  # Returns {elem_size, verify_expr} where verify_expr uses `elem_pos`,
+  # `buf`, and `depth` and produces :ok or {:error, _}.
+  defp vector_elem_verify({:scalar, kind}, _),
+    do:
+      {Schema.scalar_size(kind), "Wire.verify_bounds(buf, elem_pos, #{Schema.scalar_size(kind)})"}
+
+  defp vector_elem_verify(:string, _),
+    do:
+      {4,
+       "(case Wire.verify_follow_uoffset(buf, elem_pos) do {:ok, sp} -> Wire.verify_string_at(buf, sp); e -> e end)"}
+
+  defp vector_elem_verify({:enum, fqn}, schema) do
+    %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
+    sz = Schema.scalar_size(u)
+    {sz, "Wire.verify_bounds(buf, elem_pos, #{sz})"}
+  end
+
+  defp vector_elem_verify({:struct, fqn}, schema) do
+    %SchemaStruct{size: sz} = Schema.fetch(schema, fqn)
+    {sz, "Wire.verify_bounds(buf, elem_pos, #{sz})"}
+  end
+
+  defp vector_elem_verify({:table, fqn}, _),
+    do:
+      {4,
+       "(case Wire.verify_follow_uoffset(buf, elem_pos) do {:ok, tp} -> #{fqn_to_module(fqn)}.__verify_at__(buf, tp, depth - 1); e -> e end)"}
+
+  defp vector_elem_verify({:union, _fqn}, _) do
+    # Vectors of unions need parallel type+value vectors — Phase 3.
+    {4, ":ok"}
+  end
 
   # -----------------------------------------------------------------------
   # JSON map builders
