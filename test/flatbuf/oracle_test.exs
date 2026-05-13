@@ -7,27 +7,30 @@ defmodule Flatbuf.OracleTest do
   generate code for, encode a value via our codegen, and ask `flatc` to
   decode it back to JSON — failing if the round-trip diverges.
 
-  When `flatc` is missing from `$PATH` (or the upstream corpus hasn't
-  been pulled), every test in this module is marked `:skip` with a
-  clear notice. Install with `apt install flatbuffers-compiler` or
-  `brew install flatbuffers` to turn them on.
+  `flatc` is auto-installed under `_build/test/flatc/` on first use; the
+  binary lives outside the source tree and ships with no part of a
+  release build. If the auto-installer can't run on your platform,
+  install `flatc` manually and put it on `$PATH`, or point
+  `$FLATBUF_FLATC` at the executable.
   """
 
   use ExUnit.Case, async: false
 
-  @flatc_ok Flatbuf.Test.Flatc.available?()
+  alias Flatbuf.Test.Flatc
+  alias Flatbuf.Test.Upstream
+
   @corpus_ok Flatbuf.Test.Upstream.available?()
-  @ready @flatc_ok and @corpus_ok
 
-  if @ready do
-    alias Flatbuf.Test.Flatc
-    alias Flatbuf.Test.Upstream
-
+  if @corpus_ok do
     @schema_path Path.join(Upstream.tests_root(), "long_namespace.fbs")
     @table_module Com.Company.Test.Person
     @wire_module Flatbuf.OracleTest.Wire
 
     setup_all do
+      # Will auto-download the binary on first use; subsequent runs
+      # reuse the cached copy under _build/test/flatc/.
+      _ = Flatc.ensure_available!()
+
       {:ok, artifacts} =
         Flatbuf.generate_from_path(@schema_path, wire_module: @wire_module)
 
@@ -49,13 +52,7 @@ defmodule Flatbuf.OracleTest do
       end
     end
   else
-    reason =
-      cond do
-        !@corpus_ok -> "upstream corpus missing — run `mix flatbuf.fetch_fixtures`"
-        !@flatc_ok -> "flatc not on $PATH — install flatbuffers-compiler to enable oracle tests"
-      end
-
-    @tag skip: reason
+    @tag skip: "upstream corpus missing — run `mix flatbuf.fetch_fixtures`"
     test "oracle prerequisites" do
       :ok
     end
