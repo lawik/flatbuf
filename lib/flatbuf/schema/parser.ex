@@ -202,8 +202,17 @@ defmodule Flatbuf.Schema.Parser do
 
   defp parse_type_ref([{:punct, :lbracket, _} | rest]) do
     {inner, rest2} = parse_type_ref(rest)
-    rest3 = expect_punct(rest2, :rbracket)
-    {{:vector, inner}, rest3}
+
+    case rest2 do
+      [{:punct, :colon, _}, {:int, size, _}, {:punct, :rbracket, _} | rest3] ->
+        # Fixed-size array `[T:N]` — only valid in a struct field; resolver
+        # enforces that. The size lives in the type spec.
+        {{:array, inner, size}, rest3}
+
+      _ ->
+        rest3 = expect_punct(rest2, :rbracket)
+        {{:vector, inner}, rest3}
+    end
   end
 
   defp parse_type_ref([{:ident, name, _} | rest]), do: type_ref_for_name(name, rest)

@@ -21,6 +21,7 @@ defmodule Flatbuf.Codegen.Struct do
     type_spec = build_type_spec(s, schema)
     decode_body = build_decode(s, schema, wire_module)
     encode_body = build_encode(s, schema)
+    array_helpers = build_array_helpers(s, schema)
 
     source = """
     defmodule #{module_name} do
@@ -47,7 +48,8 @@ defmodule Flatbuf.Codegen.Struct do
       def encode(value) do
         _ = value
     #{encode_body}  end
-    end
+
+    #{array_helpers}end
     """
 
     {module_atom, source}
@@ -65,6 +67,7 @@ defmodule Flatbuf.Codegen.Struct do
   defp default_for({:scalar, kind}), do: Schema.scalar_default(kind)
   defp default_for({:enum, _}), do: nil
   defp default_for({:struct, _}), do: nil
+  defp default_for({:array, _, _}), do: []
   defp default_for(_), do: nil
 
   defp build_type_spec(s, schema) do
@@ -88,39 +91,56 @@ defmodule Flatbuf.Codegen.Struct do
     fqn_to_module(fqn) <> ".t()"
   end
 
+  defp type_for({:array, inner, _n}, schema) do
+    "[#{type_for(inner, schema)}]"
+  end
+
   defp type_for(_, _), do: "any()"
 
   defp build_decode(s, schema, _wire_module) do
     s.layout
     |> Enum.map_join("", fn entry ->
       f = entry.field
-
-      read_expr =
-        case f.type do
-          {:scalar, :u8} -> "Wire.read_u8(buf, pos + #{entry.offset})"
-          {:scalar, :i8} -> "Wire.read_i8(buf, pos + #{entry.offset})"
-          {:scalar, :u16} -> "Wire.read_u16(buf, pos + #{entry.offset})"
-          {:scalar, :i16} -> "Wire.read_i16(buf, pos + #{entry.offset})"
-          {:scalar, :u32} -> "Wire.read_u32(buf, pos + #{entry.offset})"
-          {:scalar, :i32} -> "Wire.read_i32(buf, pos + #{entry.offset})"
-          {:scalar, :u64} -> "Wire.read_u64(buf, pos + #{entry.offset})"
-          {:scalar, :i64} -> "Wire.read_i64(buf, pos + #{entry.offset})"
-          {:scalar, :f32} -> "Wire.read_f32(buf, pos + #{entry.offset})"
-          {:scalar, :f64} -> "Wire.read_f64(buf, pos + #{entry.offset})"
-          {:scalar, :bool} -> "Wire.read_bool(buf, pos + #{entry.offset})"
-          {:enum, fqn} -> enum_read(entry.offset, fqn, schema)
-          {:struct, fqn} -> "#{fqn_to_module(fqn)}.decode_at(buf, pos + #{entry.offset})"
-        end
-
+      read_expr = decode_at_expr(f.type, "pos + #{entry.offset}", schema)
       "      #{f.name}: #{read_expr},\n"
     end)
     |> trim_trailing_comma()
   end
 
-  defp enum_read(offset, fqn, schema) do
+  defp decode_at_expr({:scalar, kind}, pos_expr, _schema),
+    do: "Wire.read_#{kind}(buf, #{pos_expr})"
+
+  defp decode_at_expr({:enum, fqn}, pos_expr, schema) do
     %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
-    reader = "Wire.read_#{u}(buf, pos + #{offset})"
-    "#{fqn_to_module(fqn)}.from_value(#{reader})"
+    "#{fqn_to_module(fqn)}.from_value(Wire.read_#{u}(buf, #{pos_expr}))"
+  end
+
+  defp decode_at_expr({:struct, fqn}, pos_expr, _schema),
+    do: "#{fqn_to_module(fqn)}.decode_at(buf, #{pos_expr})"
+
+  defp decode_at_expr({:array, inner, n}, pos_expr, schema) do
+    {elem_size, _} = scalar_or_struct_size_align(inner, schema)
+    inner_decoder = decode_at_expr(inner, "(#{pos_expr}) + i * #{elem_size}", schema)
+    "(for i <- 0..#{n - 1}, do: #{inner_decoder})"
+  end
+
+  defp scalar_or_struct_size_align({:scalar, kind}, _),
+    do: {Schema.scalar_size(kind), Schema.scalar_size(kind)}
+
+  defp scalar_or_struct_size_align({:enum, fqn}, schema) do
+    %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
+    sz = Schema.scalar_size(u)
+    {sz, sz}
+  end
+
+  defp scalar_or_struct_size_align({:struct, fqn}, schema) do
+    %SchemaStruct{size: size, align: align} = Schema.fetch(schema, fqn)
+    {size, align}
+  end
+
+  defp scalar_or_struct_size_align({:array, inner, n}, schema) do
+    {sz, al} = scalar_or_struct_size_align(inner, schema)
+    {sz * n, al}
   end
 
   defp build_encode(s, schema) do
@@ -222,8 +242,56 @@ defmodule Flatbuf.Codegen.Struct do
 
       {:struct, fqn} ->
         "(#{fqn_to_module(fqn)}.encode(#{val}))::binary"
+
+      {:array, _inner, _n} ->
+        # Encoded by a per-field helper; here we just splice its result.
+        "(__encode_arr_#{f.name}(value))::binary"
     end
   end
+
+  # ----------------------------------------------------------------------
+  # Fixed-size array helpers (one defp per array-typed struct field)
+  # ----------------------------------------------------------------------
+
+  defp build_array_helpers(s, schema) do
+    s.layout
+    |> Enum.filter(fn entry -> match?({:array, _, _}, entry.field.type) end)
+    |> Enum.map_join("\n", fn entry -> array_helper(entry.field, schema) end)
+  end
+
+  defp array_helper(f, schema) do
+    {:array, inner, n} = f.type
+    elem_default = inner_default(inner, schema)
+
+    """
+      defp __encode_arr_#{f.name}(value) do
+        list = Map.get(value, #{inspect(f.name)}, [])
+        list = list ++ List.duplicate(#{inspect(elem_default)}, max(0, #{n} - length(list)))
+        list = Enum.take(list, #{n})
+        for v <- list, into: <<>>, do: #{array_elem_bin(inner, "v", schema)}
+      end
+    """
+  end
+
+  defp inner_default({:scalar, kind}, _), do: Schema.scalar_default(kind)
+  defp inner_default({:enum, fqn}, schema), do: first_enum_atom(fqn, schema)
+  defp inner_default({:struct, _}, _), do: %{}
+
+  defp first_enum_atom(fqn, schema) do
+    %SchemaEnum{variants: [{atom, _} | _]} = Schema.fetch(schema, fqn)
+    atom
+  end
+
+  defp array_elem_bin({:scalar, kind}, var, _),
+    do: "<<(#{var})::#{scalar_bin_spec(kind)}>>"
+
+  defp array_elem_bin({:enum, fqn}, var, schema) do
+    %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
+    "<<(#{fqn_to_module(fqn)}.value(#{var}))::#{scalar_bin_spec(u)}>>"
+  end
+
+  defp array_elem_bin({:struct, fqn}, var, _),
+    do: "#{fqn_to_module(fqn)}.encode(#{var})"
 
   defp scalar_bin_spec(:bool), do: "8"
   defp scalar_bin_spec(:u8), do: "8"

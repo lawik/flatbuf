@@ -284,6 +284,7 @@ defmodule Flatbuf.Schema.Resolver do
         {:scalar, _} -> :ok
         {:enum, _} -> :ok
         {:struct, _} -> :ok
+        {:array, inner, _} -> check_array_inner(s.name, f.name, inner)
         other -> throw({:resolve_error, {:bad_struct_field_type, s.name, f.name, other}})
       end
     end)
@@ -311,6 +312,13 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp resolve_refs(other, _schema), do: other
 
+  defp check_array_inner(_, _, {:scalar, _}), do: :ok
+  defp check_array_inner(_, _, {:enum, _}), do: :ok
+  defp check_array_inner(_, _, {:struct, _}), do: :ok
+
+  defp check_array_inner(struct_name, field_name, other),
+    do: throw({:resolve_error, {:bad_array_element_type, struct_name, field_name, other}})
+
   defp resolve_field_ref(%Field{type: type} = f, namespace, schema) do
     %{f | type: resolve_type(type, namespace, schema)}
   end
@@ -318,6 +326,9 @@ defmodule Flatbuf.Schema.Resolver do
   defp resolve_type({:scalar, _} = t, _ns, _schema), do: t
   defp resolve_type(:string, _ns, _schema), do: :string
   defp resolve_type({:vector, inner}, ns, schema), do: {:vector, resolve_type(inner, ns, schema)}
+
+  defp resolve_type({:array, inner, n}, ns, schema),
+    do: {:array, resolve_type(inner, ns, schema), n}
 
   defp resolve_type({:name, name}, ns, schema) do
     fqn = lookup_name(name, ns, schema)
@@ -424,6 +435,11 @@ defmodule Flatbuf.Schema.Resolver do
   defp scalar_or_struct_size_align({:struct, fqn}, schema) do
     %SchemaStruct{size: size, align: align} = Schema.fetch(schema, fqn)
     {size, align}
+  end
+
+  defp scalar_or_struct_size_align({:array, inner, n}, schema) do
+    {elem_size, elem_align} = scalar_or_struct_size_align(inner, schema)
+    {elem_size * n, elem_align}
   end
 
   defp pad_to(pos, align) do

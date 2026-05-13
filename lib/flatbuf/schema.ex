@@ -33,6 +33,7 @@ defmodule Flatbuf.Schema do
           {:scalar, scalar()}
           | :string
           | {:vector, type_spec()}
+          | {:array, type_spec(), pos_integer()}
           | {:name, String.t()}
           | {:table, String.t()}
           | {:struct, String.t()}
