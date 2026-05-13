@@ -1,0 +1,59 @@
+defmodule Flatbuf.Codegen.Enum do
+  @moduledoc """
+  Emits an Elixir module for a FlatBuffers `enum` declaration.
+
+  The module exposes `value/1` (atom → integer), `from_value/1` (integer
+  → atom or nil), and `all/0` (list of variants). Variants keep their
+  source-spelled atoms — `:Red`, not `:red` — to avoid surprising casing
+  conversions.
+  """
+
+  alias Flatbuf.Schema.Enum, as: SchemaEnum
+
+  @spec generate(SchemaEnum.t()) :: {module(), String.t()}
+  def generate(%SchemaEnum{} = enum) do
+    module_name = Enum.map_join(String.split(enum.name, "."), ".", &Macro.camelize/1)
+    module_atom = Module.concat([module_name])
+
+    variant_clauses =
+      Enum.map_join(enum.variants, "", fn {name, value} ->
+        """
+            def value(#{inspect(name)}), do: #{value}
+        """
+      end)
+
+    from_value_clauses =
+      Enum.map_join(enum.variants, "", fn {name, value} ->
+        """
+            def from_value(#{value}), do: #{inspect(name)}
+        """
+      end)
+
+    all_list = Enum.map_join(enum.variants, ", ", fn {name, _} -> inspect(name) end)
+    types = Enum.map_join(enum.variants, " | ", fn {n, _} -> inspect(n) end)
+
+    source = """
+    defmodule #{module_name} do
+      @moduledoc "Generated from FlatBuffers enum #{enum.name}. Do not edit."
+
+      @type t :: #{types}
+
+      @doc "Return the integer value of a variant."
+      @spec value(t()) :: integer()
+    #{variant_clauses}
+      @doc "Return the variant for an integer value, or `nil`."
+      @spec from_value(integer()) :: t() | nil
+    #{from_value_clauses}    def from_value(_), do: nil
+
+      @doc "List all variants in declared order."
+      @spec all() :: [t()]
+      def all, do: [#{all_list}]
+
+      @doc false
+      def __flatbuf__(:underlying_type), do: #{inspect(enum.underlying_type)}
+    end
+    """
+
+    {module_atom, source}
+  end
+end

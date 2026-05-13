@@ -1,0 +1,72 @@
+{
+  "$schema": "https://raw.githubusercontent.com/streetsidesoftware/cspell/main/cspell.schema.json",
+  "version": "0.2",
+  "language": "en",
+  "useGitignore": true,
+  "dictionaryDefinitions": [
+    {
+      "name": "fhunleth-cspell-dictionary",
+      "path": "https://raw.githubusercontent.com/fhunleth/fhunleth-cspell-dictionary/refs/heads/main/words.txt",
+      "addWords": false
+    }
+  ],
+  "dictionaries": [
+    "elixir",
+    "en-gb",
+    "fhunleth-cspell-dictionary"
+  ],
+  "ignorePaths": [
+    "deps",
+    "_build",
+    "assets",
+    "mix.exs",
+    "priv",
+    "test"
+  ],
+  "words": [
+    "flatbuf",
+    "flatbuffer",
+    "flatbuffers",
+    "flatc",
+    "voffset",
+    "soffset",
+    "uoffset",
+    "vtable",
+    "vtables",
+    "fbs",
+    "FlatBuffers",
+    "monsterdata",
+    "iolist",
+    "iodata",
+    "badarith",
+    "badarg",
+    "uoffsets",
+    "footgun",
+    "fhunleth",
+    "minalign",
+    "ubyte",
+    "ushort",
+    "ulong",
+    "voffsets",
+    "subobject",
+    "subobjects",
+    "Codegen",
+    "codegen",
+    "CSTs",
+    "soffsets",
+    "cand",
+    "flexbuffer",
+    "formedness",
+    "funs",
+    "idents",
+    "impls",
+    "lparen",
+    "representability",
+    "rparen",
+    "uoff",
+    "lbrace",
+    "rbrace",
+    "lbracket",
+    "rbracket"
+  ]
+}
