@@ -12,22 +12,32 @@ defmodule Flatbuf.Codegen do
 
   @type options :: [
           wire_module: module(),
-          namespace: module() | nil
+          namespace: String.t() | nil
         ]
 
   @type artifact :: {module(), String.t()}
 
   @doc """
   Generate all artifacts for the schema.
+
+  Options:
+
+    * `:wire_module` (required) — module name for the emitted wire
+      helper. Every generated table aliases this module.
+    * `:namespace` (optional) — string like `"Arrow.Ipc.Flatbuf"`. When
+      set, every generated module's name uses the override as its
+      root, with the schema type's short name appended. The original
+      namespace in the `.fbs` file is ignored.
   """
   @spec generate(Schema.t(), options()) :: [artifact()]
   def generate(%Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
-    codegen_opts = [wire_module: wire_module]
+    namespace = Keyword.get(opts, :namespace)
+    codegen_opts = [wire_module: wire_module, namespace: namespace]
 
     wire = [Codegen.Wire.generate(wire_module)]
 
-    enums = Enum.map(Schema.enums(schema), &Codegen.Enum.generate/1)
+    enums = Enum.map(Schema.enums(schema), &Codegen.Enum.generate(&1, codegen_opts))
 
     structs =
       Enum.map(Schema.structs(schema), &Codegen.Struct.generate(&1, schema, codegen_opts))

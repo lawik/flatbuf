@@ -11,14 +11,17 @@ defmodule Flatbuf.Codegen.Enum do
   present in the supplied integer.
   """
 
+  alias Flatbuf.Codegen.Naming
   alias Flatbuf.Schema.Enum, as: SchemaEnum
 
-  @spec generate(SchemaEnum.t()) :: {module(), String.t()}
-  def generate(%SchemaEnum{bit_flags?: true} = enum), do: generate_bit_flags(enum)
-  def generate(%SchemaEnum{} = enum), do: generate_plain(enum)
+  @spec generate(SchemaEnum.t(), keyword()) :: {module(), String.t()}
+  def generate(enum, opts \\ [])
 
-  defp generate_plain(%SchemaEnum{} = enum) do
-    module_name = Enum.map_join(String.split(enum.name, "."), ".", &Macro.camelize/1)
+  def generate(%SchemaEnum{bit_flags?: true} = enum, opts), do: generate_bit_flags(enum, opts)
+  def generate(%SchemaEnum{} = enum, opts), do: generate_plain(enum, opts)
+
+  defp generate_plain(%SchemaEnum{} = enum, opts) do
+    module_name = Naming.module_name(enum.name, Keyword.get(opts, :namespace))
     module_atom = Module.concat([module_name])
 
     variant_clauses =
@@ -82,8 +85,8 @@ defmodule Flatbuf.Codegen.Enum do
 
   # bit_flags enum: value/1 accepts an atom OR a list of atoms (OR'd),
   # from_value/1 always returns a list of present variants.
-  defp generate_bit_flags(%SchemaEnum{} = enum) do
-    module_name = Enum.map_join(String.split(enum.name, "."), ".", &Macro.camelize/1)
+  defp generate_bit_flags(%SchemaEnum{} = enum, opts) do
+    module_name = Naming.module_name(enum.name, Keyword.get(opts, :namespace))
     module_atom = Module.concat([module_name])
 
     atom_value_clauses =

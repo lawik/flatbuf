@@ -4,58 +4,47 @@ A scratchpad of issues hit while integrating flatbuf into downstream
 projects. Each entry: what's broken, where, what the workaround is, and
 how to fix it properly.
 
-## Namespace override option declared but not wired through
+When an entry is resolved, leave a brief "Resolved" note with the
+commit so the trail is visible without digging into history.
 
-**Where:** `lib/flatbuf/codegen.ex:15`
+## Namespace override (`--namespace`)
 
-The `options()` type lists `namespace: module() | nil` and the SPEC
-(section 5.1) advertises `--namespace NAME` on `mix flatbuf.gen`, but
-neither path is implemented:
+**Resolved.** `mix flatbuf.gen --namespace NAME` rewrites every emitted
+module's root namespace to `NAME`, regardless of the schema's own
+`namespace` declaration. Cross-references inside generated code use
+the override consistently, so no source rewriting is needed.
 
-- `Mix.Tasks.Flatbuf.Gen.run/1` doesn't parse `--namespace` (only
-  `--out`, `--wire-module`, `--force`).
-- `Flatbuf.Codegen.generate/2` accepts the option but ignores it. Every
-  code-emitting module (`Codegen.Table`, `Codegen.Enum`, `Codegen.Union`,
-  `Codegen.Struct`) builds the module name straight from the type's
-  fully-qualified name as set by the `.fbs` file's `namespace`
-  declaration — see `fqn_to_module/1` in each codegen module and
-  `Flatbuf.Schema.Resolver.qualify/2`.
+Also wired:
 
-**Workaround (used in `sprawl/arrow`):** rewrite the `namespace` line
-*and any fully-qualified type references* in the vendored `.fbs` source
-before running codegen. For Arrow:
+* `Codegen.generate/2` accepts `:namespace` directly.
+* `mix flatbuf.gen --include PATH` now exposes flatc-style `-I` search
+  paths through the CLI (previously only available programmatically).
 
-    sed -i 's/^namespace org.apache.arrow.flatbuf;$/namespace Arrow.Ipc.Flatbuf;/' priv/fbs/*.fbs
-    sed -i 's/org\.apache\.arrow\.flatbuf\./Arrow.Ipc.Flatbuf./g' priv/fbs/*.fbs
+For the Arrow case in `sprawl/arrow`, the sed workaround can be dropped
+in favor of:
 
-That has to be re-run after every refresh from upstream Apache Arrow.
+    mix flatbuf.gen priv/fbs/*.fbs \
+      --out lib/arrow/ipc/flatbuf \
+      --namespace Arrow.Ipc.Flatbuf \
+      --wire-module Arrow.Ipc.Flatbuf.Wire \
+      --include priv/fbs
 
-**Proper fix:** thread the option through. Probably:
-
-1. Add `namespace: :string` to the OptionParser strict list in
-   `Mix.Tasks.Flatbuf.Gen.run/1` and pass it into `Codegen.generate/2`.
-2. In each `Codegen.*.generate/2,3`, take the override and prepend it to
-   the FQN (or replace the leading namespace component) before
-   `Macro.camelize`. Need to also rewrite cross-references inside the
-   generated module bodies so they point at the same renamed targets.
-3. Decide the semantics when the `.fbs` has no `namespace` (today the
-   FQN is the bare type name; with `--namespace Foo` we'd presumably
-   want `Foo.TypeName`).
+See `test/flatbuf/namespace_override_test.exs` for the contract.
 
 ## Codegen quality: unused alias / unused variables
 
-**Where:** every generated module under
-`lib/flatbuf/codegen/{table,struct,union,enum}.ex` emits
-`alias <wire>, as: Wire` even when the resulting module doesn't reference
-it (e.g. union modules dispatch to variant modules and never touch Wire
-directly), and emits empty `decode_at(buf, pos)` bodies for
-zero-field tables, leaving `buf` and `pos` unused.
+**Resolved.** No `mix clean && mix test` warnings on the current
+codebase. Specifically:
 
-**Downstream stance:** `sprawl/arrow` *does not* relax its lint settings
-to accommodate this. Its `mix check` keeps `compile --warnings-as-errors`
-and currently fails on these warnings — accepted as a known-failing
-state pending the fix here, rather than papered over downstream.
-
-**Proper fix:** in each codegen module, only emit the Wire alias when
-the resulting body references it. For empty-table `decode_at`, underscore
-the unused params (`_buf`, `_pos`).
+* Union modules now only `alias Wire` when at least one variant is
+  a string or struct (the only variant kinds that actually call into
+  Wire); table-only unions skip the alias.
+* Empty-table `decode_at/2` underscores `buf` / `pos` to silence the
+  unused-variable warning the compiler would otherwise emit.
+* Verifier `__verify_at__/3` uses `_depth` when the table has no
+  field that recurses (no sub-tables, vectors of tables, or unions),
+  matching the same convention.
+* Union `__verify_variant__/4` underscores `_depth` per-variant for
+  string and struct variants (only the table variant recurses).
+* `bun` transitive dep was emitting "version not configured" at app
+  load; pinned in `config/config.exs`.

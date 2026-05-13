@@ -11,13 +11,26 @@ defmodule Flatbuf.Codegen.Table do
   * per-field zero-copy accessors.
   """
 
+  alias Flatbuf.Codegen.Naming
   alias Flatbuf.Schema
   alias Flatbuf.Schema.Enum, as: SchemaEnum
   alias Flatbuf.Schema.Struct, as: SchemaStruct
   alias Flatbuf.Schema.Table
 
+  @ns_key :flatbuf_codegen_table_namespace
+
   @spec generate(Table.t(), Schema.t(), keyword()) :: {module(), String.t()}
   def generate(%Table{} = t, %Schema{} = schema, opts) do
+    Process.put(@ns_key, Keyword.get(opts, :namespace))
+
+    try do
+      do_generate(t, schema, opts)
+    after
+      Process.delete(@ns_key)
+    end
+  end
+
+  defp do_generate(%Table{} = t, %Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
     is_root? = schema.root_type == t.name
     module_name = fqn_to_module(t.name)
@@ -1014,7 +1027,5 @@ defmodule Flatbuf.Codegen.Table do
     String.replace(s, ~r/,\n$/, "\n")
   end
 
-  defp fqn_to_module(fqn) do
-    Enum.map_join(String.split(fqn, "."), ".", &Macro.camelize/1)
-  end
+  defp fqn_to_module(fqn), do: Naming.module_name(fqn, Process.get(@ns_key))
 end

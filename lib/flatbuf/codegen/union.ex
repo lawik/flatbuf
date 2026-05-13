@@ -14,12 +14,25 @@ defmodule Flatbuf.Codegen.Union do
   Variant 0 is always the implicit `:NONE`.
   """
 
+  alias Flatbuf.Codegen.Naming
   alias Flatbuf.Schema
   alias Flatbuf.Schema.Struct, as: SchemaStruct
   alias Flatbuf.Schema.Union
 
+  @ns_key :flatbuf_codegen_union_namespace
+
   @spec generate(Union.t(), Schema.t(), keyword()) :: {module(), String.t()}
   def generate(%Union{} = u, %Schema{} = schema, opts) do
+    Process.put(@ns_key, Keyword.get(opts, :namespace))
+
+    try do
+      do_generate(u, schema, opts)
+    after
+      Process.delete(@ns_key)
+    end
+  end
+
+  defp do_generate(%Union{} = u, %Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
     module_name = fqn_to_module(u.name)
     module_atom = Module.concat([module_name])
@@ -219,7 +232,5 @@ defmodule Flatbuf.Codegen.Union do
     end)
   end
 
-  defp fqn_to_module(fqn) do
-    Enum.map_join(String.split(fqn, "."), ".", &Macro.camelize/1)
-  end
+  defp fqn_to_module(fqn), do: Naming.module_name(fqn, Process.get(@ns_key))
 end

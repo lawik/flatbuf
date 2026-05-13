@@ -7,12 +7,30 @@ defmodule Flatbuf.Codegen.Struct do
   position arithmetic, the writer constructs a single binary.
   """
 
+  alias Flatbuf.Codegen.Naming
   alias Flatbuf.Schema
   alias Flatbuf.Schema.Enum, as: SchemaEnum
   alias Flatbuf.Schema.Struct, as: SchemaStruct
 
+  # Process-dict key for the namespace override. The override is set
+  # at the top of `generate/3` and cleared in the `after` block, so it
+  # only lives for the duration of one type's source emission. Using
+  # the dict keeps the defp helpers below from needing an extra
+  # parameter on every callsite.
+  @ns_key :flatbuf_codegen_struct_namespace
+
   @spec generate(SchemaStruct.t(), Schema.t(), keyword()) :: {module(), String.t()}
   def generate(%SchemaStruct{} = s, %Schema{} = schema, opts) do
+    Process.put(@ns_key, Keyword.get(opts, :namespace))
+
+    try do
+      do_generate(s, schema, opts)
+    after
+      Process.delete(@ns_key)
+    end
+  end
+
+  defp do_generate(%SchemaStruct{} = s, %Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
     module_name = fqn_to_module(s.name)
     module_atom = Module.concat([module_name])
@@ -365,7 +383,5 @@ defmodule Flatbuf.Codegen.Struct do
     String.replace(s, ~r/,\n$/, "\n")
   end
 
-  defp fqn_to_module(fqn) do
-    Enum.map_join(String.split(fqn, "."), ".", &Macro.camelize/1)
-  end
+  defp fqn_to_module(fqn), do: Naming.module_name(fqn, Process.get(@ns_key))
 end
