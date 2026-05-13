@@ -10,9 +10,12 @@ defmodule Flatbuf.Codegen do
   alias Flatbuf.Codegen
   alias Flatbuf.Schema
 
+  @type nicety :: :behaviour | :jason
+
   @type options :: [
           wire_module: module(),
-          namespace: String.t() | nil
+          namespace: String.t() | nil,
+          niceties: [nicety()]
         ]
 
   @type artifact :: {module(), String.t()}
@@ -28,12 +31,17 @@ defmodule Flatbuf.Codegen do
       set, every generated module's name uses the override as its
       root, with the schema type's short name appended. The original
       namespace in the `.fbs` file is ignored.
+    * `:niceties` (optional, default `[]`) — list of atoms enabling
+      opt-in protocols/behaviours on generated *root* tables:
+        * `:behaviour` — `@behaviour Flatbuf.Table`.
+        * `:jason` — `@derive Jason.Encoder` on the table struct.
   """
   @spec generate(Schema.t(), options()) :: [artifact()]
   def generate(%Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
     namespace = Keyword.get(opts, :namespace)
-    codegen_opts = [wire_module: wire_module, namespace: namespace]
+    niceties = Keyword.get(opts, :niceties, [])
+    codegen_opts = [wire_module: wire_module, namespace: namespace, niceties: niceties]
 
     wire = [Codegen.Wire.generate(wire_module)]
 

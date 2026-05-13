@@ -42,18 +42,24 @@ defmodule Flatbuf.Codegen.Table do
     module_name = fqn_to_module(t.name)
     module_atom = Module.concat([module_name])
 
+    niceties = Keyword.get(opts, :niceties, [])
+
     defstruct_fields = build_defstruct(t, schema)
     type_spec = build_type_spec(t, schema)
     decode_at_body = build_decode_at(t, schema)
     accessor_funs = build_accessors(t, schema)
     build_body = build_encode_build(t, schema)
-    encode_funs = build_encode_top(t, is_root?)
+    encode_funs = build_encode_top(t, is_root?, schema.file_identifier)
     to_json_map_body = build_to_json_map(t, schema)
     from_json_map_body = build_from_json_map(t, schema)
     json_top = build_json_top(is_root?)
     verify_body = build_verify_at(t, schema)
-    verify_top = build_verify_top(is_root?)
+    verify_top = build_verify_top(is_root?, schema.file_identifier)
     always_emit_keys = always_emit_keys(t)
+    required_check = build_required_check(t)
+    file_id_funs = build_file_identifier_funs(schema.file_identifier)
+    behaviour_decl = build_behaviour_decl(is_root?, niceties)
+    derives = build_derive_attrs(is_root?, niceties)
 
     # An empty table has nothing to read in decode_at; underscore the
     # params to avoid the "variable is unused" warning the compiler
@@ -67,8 +73,8 @@ defmodule Flatbuf.Codegen.Table do
       @moduledoc "Generated from FlatBuffers table #{t.name}. Do not edit."
 
       alias #{inspect(wire_module)}, as: Wire
-
-      defstruct #{defstruct_fields}
+    #{behaviour_decl}#{file_id_funs}
+    #{derives}  defstruct #{defstruct_fields}
       @type t :: #{type_spec}
     #{encode_funs}#{json_top}
       @doc "Decode a table at absolute position `pos` within `buf`."
@@ -80,7 +86,7 @@ defmodule Flatbuf.Codegen.Table do
 
       @doc "Build this table inside an existing builder. Returns `{builder, addr}`."
       def build(builder, value) when is_map(value) do
-    #{build_body}  end
+    #{required_check}#{build_body}  end
 
       @doc false
       def __to_json_map__(value) when is_map(value) do
@@ -534,32 +540,72 @@ defmodule Flatbuf.Codegen.Table do
   # Encode (top-level)
   # -----------------------------------------------------------------------
 
-  defp build_encode_top(_t, is_root?) do
-    if is_root? do
-      """
+  defp build_encode_top(_t, true, file_id) do
+    finish_opts =
+      case file_id do
+        nil -> "[]"
+        id -> "[file_identifier: #{inspect(id)}]"
+      end
 
-        @doc \"Decode a buffer whose root is this table.\"
-        @spec decode(binary()) :: {:ok, t()} | {:error, term()}
-        def decode(buf) when is_binary(buf) do
-          try do
-            {:ok, decode_at(buf, Wire.root_table_pos(buf))}
-          catch
-            kind, reason -> {:error, {kind, reason}}
-          end
+    sp_finish_opts =
+      case file_id do
+        nil -> "[size_prefix: true]"
+        id -> "[size_prefix: true, file_identifier: #{inspect(id)}]"
+      end
+
+    """
+
+      @doc \"Decode a buffer whose root is this table.\"
+      @spec decode(binary()) :: {:ok, t()} | {:error, term()}
+      def decode(buf) when is_binary(buf) do
+        try do
+          {:ok, decode_at(buf, Wire.root_table_pos(buf))}
+        catch
+          kind, reason -> {:error, {kind, reason}}
         end
+      end
 
-        @doc \"Encode a value to a complete buffer with this table as the root.\"
-        @spec encode(t() | map()) :: {:ok, binary()} | {:error, term()}
-        def encode(value) when is_map(value) do
+      @doc \"\"\"
+      Decode a size-prefixed buffer whose root is this table.
+
+      The leading 4-byte little-endian size is stripped; the remainder is
+      decoded as a standard buffer.
+      \"\"\"
+      @spec decode_size_prefixed(binary()) :: {:ok, t()} | {:error, term()}
+      def decode_size_prefixed(<<size::little-32, rest::binary>>) when byte_size(rest) >= size do
+        decode(binary_part(rest, 0, size))
+      end
+
+      def decode_size_prefixed(buf) when is_binary(buf) do
+        {:error, :truncated_size_prefix}
+      end
+
+      @doc \"Encode a value to a complete buffer with this table as the root.\"
+      @spec encode(t() | map()) :: {:ok, binary()} | {:error, term()}
+      def encode(value) when is_map(value) do
+        try do
           builder = Wire.new_builder()
           {builder, root_addr} = build(builder, value)
-          builder = Wire.finish(builder, root_addr)
+          builder = Wire.finish(builder, root_addr, #{finish_opts})
           {:ok, Wire.to_binary(builder)}
+        catch
+          {:flatbuf_required, _} = err -> {:error, err}
         end
-      """
-    else
-      ""
-    end
+      end
+
+      @doc \"Encode the value with a leading 4-byte size prefix.\"
+      @spec encode_size_prefixed(t() | map()) :: {:ok, binary()} | {:error, term()}
+      def encode_size_prefixed(value) when is_map(value) do
+        try do
+          builder = Wire.new_builder()
+          {builder, root_addr} = build(builder, value)
+          builder = Wire.finish(builder, root_addr, #{sp_finish_opts})
+          {:ok, Wire.to_binary(builder)}
+        catch
+          {:flatbuf_required, _} = err -> {:error, err}
+        end
+      end
+    """
   end
 
   defp build_json_top(is_root?) do
@@ -586,31 +632,129 @@ defmodule Flatbuf.Codegen.Table do
     end
   end
 
-  defp build_verify_top(is_root?) do
-    if is_root? do
-      """
+  defp build_verify_top(true, _file_id) do
+    """
 
-        @doc \"\"\"
-        Structurally verify a buffer claimed to be this table.
+      @doc \"\"\"
+      Structurally verify a buffer claimed to be this table.
 
-        Checks every offset is within the buffer, vtables are well-formed,
-        strings have their null terminator, vectors don't claim to extend
-        past the buffer, and sub-tables are recursively verified to a
-        depth of 64. Returns `:ok` on success, `{:error, reason}` on the
-        first problem encountered.
-        \"\"\"
-        @spec verify(binary()) :: :ok | {:error, term()}
-        def verify(buf) when is_binary(buf) do
-          with :ok <- Wire.verify_size(buf, 4),
-               {:ok, root_pos} <- Wire.verify_follow_uoffset(buf, 0) do
-            __verify_at__(buf, root_pos, 64)
-          end
+      Checks every offset is within the buffer, vtables are well-formed,
+      strings have their null terminator, vectors don't claim to extend
+      past the buffer, required fields are present, and sub-tables are
+      recursively verified to a depth of 64. Returns `:ok` on success,
+      `{:error, reason}` on the first problem encountered.
+      \"\"\"
+      @spec verify(binary()) :: :ok | {:error, term()}
+      def verify(buf) when is_binary(buf) do
+        with :ok <- Wire.verify_size(buf, 4),
+             {:ok, root_pos} <- Wire.verify_follow_uoffset(buf, 0) do
+          __verify_at__(buf, root_pos, 64)
         end
-      """
+      end
+
+      @doc \"\"\"
+      Verify a size-prefixed buffer claimed to be this table.
+
+      Validates the leading u32 size, then runs `verify/1` on the body.
+      \"\"\"
+      @spec verify_size_prefixed(binary()) :: :ok | {:error, term()}
+      def verify_size_prefixed(<<size::little-32, rest::binary>>) when byte_size(rest) == size do
+        verify(rest)
+      end
+
+      def verify_size_prefixed(<<size::little-32, rest::binary>>) do
+        {:error, {:size_prefix_mismatch, size, byte_size(rest)}}
+      end
+
+      def verify_size_prefixed(buf) when is_binary(buf) do
+        {:error, {:buffer_too_small, 4}}
+      end
+    """
+  end
+
+  # -----------------------------------------------------------------------
+  # Niceties: opt-in behaviour and protocol derives
+  # -----------------------------------------------------------------------
+
+  defp build_behaviour_decl(true, niceties) do
+    if :behaviour in niceties do
+      "\n  @behaviour Flatbuf.Table\n"
     else
       ""
     end
   end
+
+  # Jason.Encoder is derived on the table struct itself, which fits the
+  # decoded-shape (atoms + scalars + nested structs) cleanly. Users who
+  # want flatc-shaped JSON instead use `to_json/1`.
+  defp build_derive_attrs(true, niceties) do
+    if :jason in niceties do
+      "  @derive Jason.Encoder\n  "
+    else
+      ""
+    end
+  end
+
+  # -----------------------------------------------------------------------
+  # File identifier
+  # -----------------------------------------------------------------------
+
+  defp build_file_identifier_funs(nil), do: ""
+
+  defp build_file_identifier_funs(id) when is_binary(id) do
+    """
+
+      @doc \"\"\"
+      The 4-byte `file_identifier` this schema declares. Generated tables
+      with a `file_identifier` write it into the buffer header during
+      `encode/1`; callers can compare it against the bytes at offset 4
+      (or 8 for size-prefixed buffers) to disambiguate union-of-roots.
+      \"\"\"
+      @spec file_identifier() :: binary()
+      def file_identifier, do: #{inspect(id)}
+    """
+  end
+
+  # -----------------------------------------------------------------------
+  # Required-field enforcement (encode side)
+  # -----------------------------------------------------------------------
+
+  # Required fields fail-fast at the top of `build/2`. Throwing a known
+  # tag here is what `encode/1` catches above to translate the failure
+  # into an `{:error, _}` return tuple.
+  defp build_required_check(%Table{fields: fields}) do
+    required =
+      Enum.filter(fields, fn f ->
+        Map.get(f.attributes, :required) == true and field_can_be_required?(f.type)
+      end)
+
+    case required do
+      [] ->
+        ""
+
+      _ ->
+        names = Enum.map(required, & &1.name)
+
+        """
+            Enum.each(#{inspect(names)}, fn name ->
+              case Map.get(value, name) do
+                nil -> throw({:flatbuf_required, name})
+                _ -> :ok
+              end
+            end)
+        """
+    end
+  end
+
+  # `required` is only meaningful for fields that occupy a uoffset slot;
+  # the parser/resolver should already reject `required` on scalars but
+  # we filter defensively so a stray attribute doesn't generate dead code.
+  defp field_can_be_required?(:string), do: true
+  defp field_can_be_required?({:vector, _}), do: true
+  defp field_can_be_required?({:table, _}), do: true
+  defp field_can_be_required?({:union, _}), do: true
+  defp field_can_be_required?({:struct, _}), do: true
+  defp field_can_be_required?(_), do: false
 
   # -----------------------------------------------------------------------
   # Encode (build into existing builder)
@@ -988,10 +1132,17 @@ defmodule Flatbuf.Codegen.Table do
   defp recurses_field?(_), do: false
 
   defp build_verify_at(t, schema) do
-    clauses =
+    field_clauses =
       t.fields
       |> Enum.map(fn f -> verify_field(f, schema) end)
       |> Enum.reject(&(&1 == ""))
+
+    required_clauses =
+      t.fields
+      |> Enum.filter(fn f -> Map.get(f.attributes, :required) == true end)
+      |> Enum.map(&verify_required_field/1)
+
+    clauses = required_clauses ++ field_clauses
 
     case clauses do
       [] ->
@@ -1006,6 +1157,14 @@ defmodule Flatbuf.Codegen.Table do
               end
         """
     end
+  end
+
+  defp verify_required_field(f) do
+    """
+    :ok <- (if Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) == 0,
+              do: {:error, {:missing_required, #{inspect(f.name)}}},
+              else: :ok)
+    """
   end
 
   defp verify_field(f, schema) do
