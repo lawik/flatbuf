@@ -32,9 +32,12 @@ defmodule Flatbuf.Codegen do
     structs =
       Enum.map(Schema.structs(schema), &Codegen.Struct.generate(&1, schema, codegen_opts))
 
+    unions =
+      Enum.map(Schema.unions(schema), &Codegen.Union.generate(&1, schema, codegen_opts))
+
     tables =
       Enum.map(Schema.tables(schema), &Codegen.Table.generate(&1, schema, codegen_opts))
 
-    wire ++ enums ++ structs ++ tables
+    wire ++ enums ++ structs ++ unions ++ tables
   end
 end

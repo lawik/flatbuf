@@ -60,9 +60,16 @@ defmodule Flatbuf.Schema.Lexer do
     end
   end
 
-  # String literal
+  # String literal — both "…" and '…' per the .fbs grammar.
   defp do_tokenize(<<?", rest::binary>>, line, acc) do
-    case read_string(rest, line, []) do
+    case read_string(rest, line, ?", []) do
+      {:ok, str, line2, rest2} -> do_tokenize(rest2, line2, [{:string, str, line} | acc])
+      {:error, _} = err -> err
+    end
+  end
+
+  defp do_tokenize(<<?', rest::binary>>, line, acc) do
+    case read_string(rest, line, ?', []) do
       {:ok, str, line2, rest2} -> do_tokenize(rest2, line2, [{:string, str, line} | acc])
       {:error, _} = err -> err
     end
@@ -154,30 +161,30 @@ defmodule Flatbuf.Schema.Lexer do
   defp skip_block_comment(<<"\r", rest::binary>>, line), do: skip_block_comment(rest, line + 1)
   defp skip_block_comment(<<_, rest::binary>>, line), do: skip_block_comment(rest, line)
 
-  defp read_string("", line, _acc), do: {:error, {:unterminated_string, line}}
+  defp read_string("", line, _term, _acc), do: {:error, {:unterminated_string, line}}
 
-  defp read_string(<<?", rest::binary>>, line, acc),
+  defp read_string(<<c, rest::binary>>, line, term, acc) when c == term,
     do: {:ok, IO.iodata_to_binary(Enum.reverse(acc)), line, rest}
 
-  defp read_string(<<"\\", rest::binary>>, line, acc) do
+  defp read_string(<<"\\", rest::binary>>, line, term, acc) do
     case rest do
-      <<?n, r::binary>> -> read_string(r, line, [?\n | acc])
-      <<?t, r::binary>> -> read_string(r, line, [?\t | acc])
-      <<?r, r::binary>> -> read_string(r, line, [?\r | acc])
-      <<?\\, r::binary>> -> read_string(r, line, [?\\ | acc])
-      <<?", r::binary>> -> read_string(r, line, [?" | acc])
-      <<?', r::binary>> -> read_string(r, line, [?' | acc])
-      <<?0, r::binary>> -> read_string(r, line, [0 | acc])
+      <<?n, r::binary>> -> read_string(r, line, term, [?\n | acc])
+      <<?t, r::binary>> -> read_string(r, line, term, [?\t | acc])
+      <<?r, r::binary>> -> read_string(r, line, term, [?\r | acc])
+      <<?\\, r::binary>> -> read_string(r, line, term, [?\\ | acc])
+      <<?", r::binary>> -> read_string(r, line, term, [?" | acc])
+      <<?', r::binary>> -> read_string(r, line, term, [?' | acc])
+      <<?0, r::binary>> -> read_string(r, line, term, [0 | acc])
       <<c, _::binary>> -> {:error, {:bad_escape, <<c>>, line}}
       "" -> {:error, {:unterminated_string, line}}
     end
   end
 
-  defp read_string(<<"\n", rest::binary>>, line, acc),
-    do: read_string(rest, line + 1, [?\n | acc])
+  defp read_string(<<"\n", rest::binary>>, line, term, acc),
+    do: read_string(rest, line + 1, term, [?\n | acc])
 
-  defp read_string(<<c::utf8, rest::binary>>, line, acc),
-    do: read_string(rest, line, [<<c::utf8>> | acc])
+  defp read_string(<<c::utf8, rest::binary>>, line, term, acc),
+    do: read_string(rest, line, term, [<<c::utf8>> | acc])
 
   defp read_ident(<<c, rest::binary>>, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c == ?_,

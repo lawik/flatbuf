@@ -127,12 +127,14 @@ defmodule Flatbuf.Schema.Parser do
     parse_file(rest2, [], [decl | acc])
   end
 
-  defp parse_file([{:kw, :union, line} | _rest], _pending_docs, _acc) do
-    throw({:parse_error, {:unsupported_in_phase1, :union, line}})
+  defp parse_file([{:kw, :union, line} | rest], pending_docs, acc) do
+    {decl, rest2} = parse_union(rest, line, pending_docs)
+    parse_file(rest2, [], [decl | acc])
   end
 
-  defp parse_file([{:kw, :rpc_service, line} | _rest], _pending_docs, _acc) do
-    throw({:parse_error, {:unsupported_in_phase1, :rpc_service, line}})
+  defp parse_file([{:kw, :rpc_service, line} | rest], pending_docs, acc) do
+    {decl, rest2} = parse_rpc_service(rest, line, pending_docs)
+    parse_file(rest2, [], [decl | acc])
   end
 
   defp parse_file([tok | _rest], _pending_docs, _acc) do
@@ -262,13 +264,36 @@ defmodule Flatbuf.Schema.Parser do
   defp parse_literal([{:ident, name, _} | rest]) do
     case name do
       "inf" -> {{:float, :infinity}, rest}
+      "infinity" -> {{:float, :infinity}, rest}
       "nan" -> {{:float, :nan}, rest}
       _ -> {{:ident, name}, rest}
     end
   end
 
+  # Array literal: `= [ … ]`. Used as a default for vector fields.
+  # FlatBuffers can't actually express a non-empty vector default on the
+  # wire, so we record whatever the schema author wrote but the codegen
+  # collapses everything down to `[]` at runtime.
+  defp parse_literal([{:punct, :lbracket, _} | rest]) do
+    {items, rest2} = parse_array_items(rest, [])
+    rest3 = expect_punct(rest2, :rbracket)
+    {{:array, items}, rest3}
+  end
+
   defp parse_literal([tok | _]),
     do: throw({:parse_error, {:expected_literal, tok}})
+
+  defp parse_array_items([{:punct, :rbracket, _} | _] = rest, acc),
+    do: {Enum.reverse(acc), rest}
+
+  defp parse_array_items(tokens, acc) do
+    {item, rest} = parse_literal(tokens)
+
+    case rest do
+      [{:punct, :comma, _} | r] -> parse_array_items(r, [item | acc])
+      _ -> {Enum.reverse([item | acc]), rest}
+    end
+  end
 
   # Attribute list: (name [: value] [, ...])
   defp maybe_parse_attribute_list([{:punct, :lparen, _} | rest]) do
@@ -309,6 +334,131 @@ defmodule Flatbuf.Schema.Parser do
       _ -> {Enum.reverse([{name, value} | acc]), rest2}
     end
   end
+
+  # RPC service -----------------------------------------------------------
+  #
+  # Parsed for completeness, surfaced as a CST node, then discarded by the
+  # resolver. We don't implement a transport — per the spec we just want
+  # the data available so other tooling can build on top.
+
+  defp parse_rpc_service(tokens, line, docs) do
+    {name, rest} = expect_ident(tokens, "rpc_service name")
+    {attrs, rest2} = maybe_parse_attribute_list(rest)
+    rest3 = expect_punct(rest2, :lbrace)
+    {methods, rest4} = parse_rpc_methods(rest3, [], [])
+    rest5 = expect_punct(rest4, :rbrace)
+
+    {{:rpc_service,
+      %{
+        name: name,
+        methods: methods,
+        attributes: attrs,
+        docs: docs,
+        line: line
+      }}, rest5}
+  end
+
+  defp parse_rpc_methods([{:punct, :rbrace, _} | _] = rest, _docs, acc),
+    do: {Enum.reverse(acc), rest}
+
+  defp parse_rpc_methods([{:doc, body, _} | rest], docs, acc),
+    do: parse_rpc_methods(rest, docs ++ [body], acc)
+
+  defp parse_rpc_methods(tokens, docs, acc) do
+    {name, rest} = expect_ident(tokens, "rpc method name")
+    rest2 = expect_punct(rest, :lparen)
+    {input, rest3} = parse_type_ref(rest2)
+    rest4 = expect_punct(rest3, :rparen)
+    rest5 = expect_punct(rest4, :colon)
+    {output, rest6} = parse_type_ref(rest5)
+    {method_attrs, rest7} = maybe_parse_attribute_list(rest6)
+    rest8 = expect_punct(rest7, :semi)
+
+    method = %{
+      name: name,
+      input: input,
+      output: output,
+      attributes: method_attrs,
+      docs: docs
+    }
+
+    parse_rpc_methods(rest8, [], [method | acc])
+  end
+
+  # Union -----------------------------------------------------------------
+
+  defp parse_union(tokens, line, docs) do
+    {name, rest} = expect_ident(tokens, "union name")
+    {attrs, rest2} = maybe_parse_attribute_list(rest)
+    rest3 = expect_punct(rest2, :lbrace)
+    {variants, rest4} = parse_union_variants(rest3, [], [])
+    rest5 = expect_punct(rest4, :rbrace)
+
+    {{:union,
+      %{
+        name: name,
+        variants: variants,
+        attributes: attrs,
+        docs: docs,
+        line: line
+      }}, rest5}
+  end
+
+  defp parse_union_variants([{:punct, :rbrace, _} | _] = rest, _docs, acc),
+    do: {Enum.reverse(acc), rest}
+
+  defp parse_union_variants([{:doc, body, _line} | rest], docs, acc),
+    do: parse_union_variants(rest, docs ++ [body], acc)
+
+  defp parse_union_variants(tokens, docs, acc) do
+    {variant, rest} = parse_union_variant(tokens, docs)
+
+    case rest do
+      [{:punct, :comma, _} | r] ->
+        parse_union_variants(r, [], [variant | acc])
+
+      [{:punct, :rbrace, _} | _] ->
+        {Enum.reverse([variant | acc]), rest}
+
+      [tok | _] ->
+        throw({:parse_error, {:unexpected_token_in_union, tok}})
+    end
+  end
+
+  # A union variant is one of:
+  #   TypeName
+  #   alias_name : TypeName
+  #   "string"  (the scalar — variant name defaults to "string")
+  defp parse_union_variant([{:ident, alias_name, _}, {:punct, :colon, _} | rest], docs) do
+    {type, rest2} = parse_type_ref(rest)
+    {var_attrs, rest3} = maybe_parse_attribute_list(rest2)
+    {%{name: alias_name, type: type, docs: docs, attributes: var_attrs}, rest3}
+  end
+
+  defp parse_union_variant([{:ident, name, _} | rest], docs) do
+    case Map.fetch(@scalar_types, name) do
+      {:ok, :string} ->
+        {var_attrs, rest2} = maybe_parse_attribute_list(rest)
+        {%{name: "string", type: :string, docs: docs, attributes: var_attrs}, rest2}
+
+      {:ok, _other} ->
+        throw({:parse_error, {:bad_union_variant, name}})
+
+      :error ->
+        {full, rest2} =
+          case rest do
+            [{:punct, :dot, _} | _] -> continue_dotted(rest, name)
+            _ -> {name, rest}
+          end
+
+        {var_attrs, rest3} = maybe_parse_attribute_list(rest2)
+        variant_name = full |> String.split(".") |> List.last()
+        {%{name: variant_name, type: {:name, full}, docs: docs, attributes: var_attrs}, rest3}
+    end
+  end
+
+  defp parse_union_variant([tok | _], _docs),
+    do: throw({:parse_error, {:expected_union_variant, tok}})
 
   # Enum ------------------------------------------------------------------
 
@@ -368,7 +518,9 @@ defmodule Flatbuf.Schema.Parser do
           {nil, rest}
       end
 
-    variant = %{name: name, value: value, docs: docs}
+    {var_attrs, rest2} = maybe_parse_attribute_list(rest2)
+
+    variant = %{name: name, value: value, docs: docs, attributes: var_attrs}
 
     case rest2 do
       [{:punct, :comma, _} | r] ->

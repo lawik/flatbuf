@@ -14,6 +14,7 @@ defmodule Flatbuf.Schema do
   alias Flatbuf.Schema.Enum, as: SchemaEnum
   alias Flatbuf.Schema.Struct, as: SchemaStruct
   alias Flatbuf.Schema.Table
+  alias Flatbuf.Schema.Union
 
   @type scalar ::
           :bool
@@ -36,8 +37,9 @@ defmodule Flatbuf.Schema do
           | {:table, String.t()}
           | {:struct, String.t()}
           | {:enum, String.t()}
+          | {:union, String.t()}
 
-  @type type_record :: Table.t() | SchemaStruct.t() | SchemaEnum.t()
+  @type type_record :: Table.t() | SchemaStruct.t() | SchemaEnum.t() | Union.t()
 
   @type t :: %__MODULE__{
           types: %{String.t() => type_record()},
@@ -89,6 +91,17 @@ defmodule Flatbuf.Schema do
     types
     |> Map.values()
     |> Enum.filter(&match?(%SchemaEnum{}, &1))
+    |> Enum.sort_by(& &1.name)
+  end
+
+  @doc """
+  Return all unions in the schema, in stable order by FQN.
+  """
+  @spec unions(t()) :: [Union.t()]
+  def unions(%__MODULE__{types: types}) do
+    types
+    |> Map.values()
+    |> Enum.filter(&match?(%Union{}, &1))
     |> Enum.sort_by(& &1.name)
   end
 

@@ -203,6 +203,25 @@ defmodule Flatbuf.Codegen.Wire do
     end
 
     # ---------------------------------------------------------------------
+    # Standalone structs (used by union variants of struct type)
+    # ---------------------------------------------------------------------
+
+    @doc """
+    Push a struct's pre-serialized bytes as a standalone object, aligned
+    to `struct_align`. Returns `{builder, addr}` so the caller can use
+    `addr` as a uoffset target. Used by union variants of struct type
+    (struct-in-table is inline; struct-in-union is referenced by offset).
+    """
+    def create_struct(b, bin, struct_align) when is_binary(bin) do
+      b =
+        b
+        |> align(struct_align)
+        |> push_raw(bin)
+
+      {b, b.size}
+    end
+
+    # ---------------------------------------------------------------------
     # Vectors
     # ---------------------------------------------------------------------
 

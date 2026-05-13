@@ -87,6 +87,7 @@ defmodule Flatbuf.Codegen.Table do
   defp type_for({:enum, fqn}, _), do: fqn_to_module(fqn) <> ".t() | nil"
   defp type_for({:struct, fqn}, _), do: fqn_to_module(fqn) <> ".t() | nil"
   defp type_for({:table, fqn}, _), do: fqn_to_module(fqn) <> ".t() | nil"
+  defp type_for({:union, fqn}, _), do: fqn_to_module(fqn) <> ".t()"
 
   # -----------------------------------------------------------------------
   # Defaults
@@ -108,6 +109,7 @@ defmodule Flatbuf.Codegen.Table do
       {{:vector, _}, _} -> []
       {{:table, _}, _} -> nil
       {{:struct, _}, _} -> nil
+      {{:union, _}, _} -> nil
     end
   end
 
@@ -157,39 +159,62 @@ defmodule Flatbuf.Codegen.Table do
     """
       @doc \"Read field `#{f.name}` from a table at position `pos`. Returns the field value or its default.\"
       def decode_field_#{f.name}(buf, pos) do
-        case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
-    #{body}    end
-      end
+    #{body}  end
     """
   end
 
   defp field_decode_body(f, schema) do
-    default = default_value(f, schema)
-    default_lit = inspect(default)
+    case f.type do
+      {:union, fqn} ->
+        # Union fields don't fit the regular `vtable_slot -> read` pattern:
+        # the discriminator is in slot N, the uoffset in slot N+2, and we
+        # have to read both before we can dispatch.
+        value_slot = f.vtable_slot + 2
 
-    read_expr =
-      case f.type do
-        {:scalar, kind} ->
-          "Wire.read_#{kind}(buf, pos + o)"
+        """
+              case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                0 -> nil
+                type_o ->
+                  case Wire.read_vtable_field(buf, pos, #{value_slot}) do
+                    0 -> nil
+                    value_o ->
+                      disc = Wire.read_u8(buf, pos + type_o)
+                      abs_pos = Wire.follow_uoffset(buf, pos + value_o)
+                      #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                  end
+              end
+        """
+        |> String.trim_trailing()
+        |> Kernel.<>("\n")
 
-        :string ->
-          "Wire.read_string_at(buf, Wire.follow_uoffset(buf, pos + o))"
+      _ ->
+        default = default_value(f, schema)
+        default_lit = inspect(default)
 
-        {:vector, inner} ->
-          decode_vector_expr(inner, schema)
+        read_expr =
+          case f.type do
+            {:scalar, kind} ->
+              "Wire.read_#{kind}(buf, pos + o)"
 
-        {:enum, fqn} ->
-          %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
-          "#{fqn_to_module(fqn)}.from_value(Wire.read_#{u}(buf, pos + o))"
+            :string ->
+              "Wire.read_string_at(buf, Wire.follow_uoffset(buf, pos + o))"
 
-        {:struct, fqn} ->
-          "#{fqn_to_module(fqn)}.decode_at(buf, pos + o)"
+            {:vector, inner} ->
+              decode_vector_expr(inner, schema)
 
-        {:table, fqn} ->
-          "#{fqn_to_module(fqn)}.decode_at(buf, Wire.follow_uoffset(buf, pos + o))"
-      end
+            {:enum, fqn} ->
+              %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
+              "#{fqn_to_module(fqn)}.from_value(Wire.read_#{u}(buf, pos + o))"
 
-    "      0 -> #{default_lit}\n      o -> #{read_expr}\n"
+            {:struct, fqn} ->
+              "#{fqn_to_module(fqn)}.decode_at(buf, pos + o)"
+
+            {:table, fqn} ->
+              "#{fqn_to_module(fqn)}.decode_at(buf, Wire.follow_uoffset(buf, pos + o))"
+          end
+
+        "      case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do\n        0 -> #{default_lit}\n        o -> #{read_expr}\n      end\n"
+    end
   end
 
   defp decode_vector_expr(inner, schema) do
@@ -328,6 +353,24 @@ defmodule Flatbuf.Codegen.Table do
               case #{field_lookup} do
                 nil -> {b, nil}
                 v -> #{fqn_to_module(fqn)}.build(b, v)
+              end
+        """
+
+        {var, line}
+
+      {:union, fqn} ->
+        # Two locals: the discriminator and the variant value's addr.
+        disc_var = "disc_#{f.name}"
+
+        line = """
+            {b, #{disc_var}, #{var}} =
+              case #{field_lookup} do
+                nil ->
+                  {b, 0, nil}
+
+                {variant_atom, variant_value} ->
+                  {b2, addr} = #{fqn_to_module(fqn)}.build_variant(b, variant_atom, variant_value)
+                  {b2, #{fqn_to_module(fqn)}.discriminator(variant_atom), addr}
               end
         """
 
@@ -527,6 +570,21 @@ defmodule Flatbuf.Codegen.Table do
                 nil -> b
                 v -> Wire.add_field_struct(b, #{slot}, #{mod}.encode(v), #{al})
               end
+        """
+
+      {:union, _fqn} ->
+        value_slot = slot + 2
+        disc_var = "disc_#{f.name}"
+        addr_var = "addr_#{f.name}"
+
+        # First the value uoffset (slot N+2), then the u8 discriminator
+        # (slot N). Order doesn't change correctness — the vtable maps
+        # slot → offset either way — but pushing the offset first keeps
+        # the field-add code shape consistent with how flatc-generated
+        # code lays it out.
+        """
+            b = Wire.add_field_offset(b, #{value_slot}, #{addr_var})
+            b = Wire.add_field_scalar(b, #{slot}, #{disc_var}, 0, &Wire.push_u8/2)
         """
     end
   end

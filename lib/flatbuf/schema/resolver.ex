@@ -16,6 +16,7 @@ defmodule Flatbuf.Schema.Resolver do
   alias Flatbuf.Schema.Parser
   alias Flatbuf.Schema.Struct, as: SchemaStruct
   alias Flatbuf.Schema.Table
+  alias Flatbuf.Schema.Union
 
   @doc """
   Resolve a single schema source string with no includes.
@@ -118,6 +119,9 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp add_decl({:attribute_decl, _name, _line}, state), do: state
 
+  # RPC services are parsed for completeness but don't generate code.
+  defp add_decl({:rpc_service, _body}, state), do: state
+
   defp add_decl({:table, body}, state) do
     fqn = qualify(body.name, state.namespace)
 
@@ -164,6 +168,28 @@ defmodule Flatbuf.Schema.Resolver do
     }
 
     %{state | schema: put_type(state.schema, fqn, struct_rec)}
+  end
+
+  defp add_decl({:union, body}, state) do
+    fqn = qualify(body.name, state.namespace)
+
+    variants =
+      body.variants
+      |> Enum.with_index(1)
+      |> Enum.map(fn {v, disc} ->
+        {String.to_atom(v.name), v.type, disc}
+      end)
+
+    union = %Union{
+      name: fqn,
+      namespace: state.namespace,
+      short_name: body.name,
+      variants: variants,
+      attributes: normalize_attrs(body.attributes),
+      docs: body.docs
+    }
+
+    %{state | schema: put_type(state.schema, fqn, union)}
   end
 
   defp add_decl({:enum, body}, state) do
@@ -240,6 +266,24 @@ defmodule Flatbuf.Schema.Resolver do
     %{s | fields: fields}
   end
 
+  defp resolve_refs(%Union{} = u, schema) do
+    variants =
+      Enum.map(u.variants, fn {name, type, disc} ->
+        {name, resolve_type(type, u.namespace, schema), disc}
+      end)
+
+    Enum.each(variants, fn {name, type, _} ->
+      case type do
+        {:table, _} -> :ok
+        {:struct, _} -> :ok
+        :string -> :ok
+        other -> throw({:resolve_error, {:bad_union_variant_type, u.name, name, other}})
+      end
+    end)
+
+    %{u | variants: variants}
+  end
+
   defp resolve_refs(other, _schema), do: other
 
   defp resolve_field_ref(%Field{type: type} = f, namespace, schema) do
@@ -257,6 +301,7 @@ defmodule Flatbuf.Schema.Resolver do
       %Table{} -> {:table, fqn}
       %SchemaStruct{} -> {:struct, fqn}
       %SchemaEnum{} -> {:enum, fqn}
+      %Union{} -> {:union, fqn}
       nil -> throw({:resolve_error, {:unknown_type, name}})
     end
   end
@@ -292,13 +337,21 @@ defmodule Flatbuf.Schema.Resolver do
       Enum.map_reduce(fields, 4, fn f, slot ->
         explicit = Map.get(f.attributes, :id)
         slot_used = if is_integer(explicit), do: 4 + explicit * 2, else: slot
-        {%{f | vtable_slot: slot_used}, slot_used + 2}
+        step = slot_step(f.type)
+        {%{f | vtable_slot: slot_used}, slot_used + step}
       end)
 
     %{t | fields: assigned}
   end
 
   defp assign_slots(other), do: other
+
+  # Union fields (and vectors of unions) consume two adjacent vtable
+  # slots — the u8 discriminator at slot N, the uoffset value at N+2 —
+  # so the next field starts at N+4.
+  defp slot_step({:union, _}), do: 4
+  defp slot_step({:vector, {:union, _}}), do: 4
+  defp slot_step(_), do: 2
 
   defp compute_struct_layout(%SchemaStruct{} = s, schema) do
     {layout, total, max_align} =
