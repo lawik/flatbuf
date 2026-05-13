@@ -1,6 +1,11 @@
 defmodule Flatbuf.MixProject do
   use Mix.Project
 
+  @description """
+  Pure-Elixir FlatBuffers with compile-time, file-emitting codegen.
+  Generated modules have no runtime dependency on :flatbuf.
+  """
+
   def project do
     [
       app: :flatbuf,
@@ -15,8 +20,8 @@ defmodule Flatbuf.MixProject do
         &String.ends_with?(&1, "fixture_manifest.exs")
       ],
       deps: deps(),
-      name: "Flatbuf",
-      description: "TODO: write a proper description",
+      name: "flatbuf",
+      description: @description,
       docs: docs(),
       package: package(),
       aliases: aliases(),
@@ -37,7 +42,8 @@ defmodule Flatbuf.MixProject do
   def docs do
     [
       main: "readme",
-      extras: ["README.md"]
+      extras: ["README.md", "CHANGELOG.md", "SPEC.md"],
+      source_url: "https://github.com/lawik/flatbuf"
     ]
   end
 
@@ -45,7 +51,12 @@ defmodule Flatbuf.MixProject do
     [
       name: :flatbuf,
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => "https://github.com/TODO/flatbuf"}
+      maintainers: ["Lars Wikman"],
+      files: ~w(lib mix.exs README.md CHANGELOG.md SPEC.md LICENSE.md),
+      links: %{
+        "GitHub" => "https://github.com/lawik/flatbuf",
+        "Changelog" => "https://github.com/lawik/flatbuf/blob/main/CHANGELOG.md"
+      }
     ]
   end
 
