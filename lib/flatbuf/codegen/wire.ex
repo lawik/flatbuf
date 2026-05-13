@@ -351,10 +351,20 @@ defmodule Flatbuf.Codegen.Wire do
               bytes: iolist(),
               size: non_neg_integer(),
               minalign: pos_integer(),
-              current_object: nil | %{start_size: non_neg_integer(), slots: [{pos_integer(), non_neg_integer()}]}
+              current_object: nil | %{start_size: non_neg_integer(), slots: [{pos_integer(), non_neg_integer()}]},
+              string_cache: %{optional(binary()) => non_neg_integer()}
             }
 
-      defstruct bytes: [], size: 0, minalign: 1, current_object: nil
+      defstruct bytes: [],
+                size: 0,
+                minalign: 1,
+                current_object: nil,
+                # Cache of already-emitted shared strings →
+                # `create_shared_string/2` reuses the addr instead of
+                # writing the same bytes twice. Set only by
+                # `create_shared_string/2`; regular `create_string/2`
+                # never consults or touches it.
+                string_cache: %{}
     end
 
     @doc "Create a new builder."
@@ -440,6 +450,24 @@ defmodule Flatbuf.Codegen.Wire do
       b = push_raw(b, str)
       b = b |> Map.update!(:minalign, &max(&1, 4)) |> push_raw(<<len::little-32>>)
       {b, b.size}
+    end
+
+    @doc """
+    Like `create_string/2`, but consults the builder's string cache:
+    if the same string has already been written via a previous
+    `create_shared_string/2` call in this buffer, its address is
+    reused and no new bytes are written. Used for fields tagged
+    `(shared)`.
+    """
+    def create_shared_string(b, str) when is_binary(str) do
+      case Map.fetch(b.string_cache, str) do
+        {:ok, addr} ->
+          {b, addr}
+
+        :error ->
+          {b, addr} = create_string(b, str)
+          {%{b | string_cache: Map.put(b.string_cache, str, addr)}, addr}
+      end
     end
 
     # ---------------------------------------------------------------------

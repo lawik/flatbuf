@@ -813,12 +813,21 @@ defmodule Flatbuf.Codegen.Table do
 
     case f.type do
       :string ->
+        # `(shared)` routes through create_shared_string, which dedups
+        # identical strings within a single buffer via the builder's
+        # string_cache.
+        create_fn =
+          if Map.get(f.attributes, :shared, false) do
+            "Wire.create_shared_string"
+          else
+            "Wire.create_string"
+          end
+
         line = """
             {b, #{var}} =
               case #{field_lookup} do
                 nil -> {b, nil}
-                "" -> Wire.create_string(b, "")
-                s when is_binary(s) -> Wire.create_string(b, s)
+                s when is_binary(s) -> #{create_fn}(b, s)
               end
         """
 
