@@ -118,9 +118,9 @@ defmodule Flatbuf.Codegen.Table do
       {{:scalar, _}, {:int, n}} -> n
       {{:scalar, _}, {:float, f}} -> f
       {{:scalar, _}, {:bool, b}} -> b
-      {{:enum, fqn}, nil} -> first_variant_atom(fqn, schema)
-      {{:enum, fqn}, {:ident, name}} -> resolve_enum_ident(fqn, name, schema)
-      {{:enum, fqn}, {:int, n}} -> int_to_enum_atom(fqn, n, schema)
+      {{:enum, fqn}, nil} -> default_enum_value(fqn, schema)
+      {{:enum, fqn}, {:ident, name}} -> explicit_enum_default(fqn, name, schema)
+      {{:enum, fqn}, {:int, n}} -> int_enum_default(fqn, n, schema)
       {:string, _} -> nil
       {{:vector, _}, _} -> []
       {{:table, _}, _} -> nil
@@ -129,9 +129,56 @@ defmodule Flatbuf.Codegen.Table do
     end
   end
 
-  defp first_variant_atom(fqn, schema) do
-    %SchemaEnum{variants: [{name, _} | _]} = Schema.fetch(schema, fqn)
-    name
+  defp default_enum_value(fqn, schema) do
+    case Schema.fetch(schema, fqn) do
+      %SchemaEnum{bit_flags?: true} -> []
+      %SchemaEnum{variants: [{name, _} | _]} -> name
+    end
+  end
+
+  defp explicit_enum_default(fqn, name, schema) do
+    atom = resolve_enum_ident(fqn, name, schema)
+
+    case Schema.fetch(schema, fqn) do
+      %SchemaEnum{bit_flags?: true} -> [atom]
+      _ -> atom
+    end
+  end
+
+  defp int_enum_default(fqn, n, schema) do
+    case Schema.fetch(schema, fqn) do
+      %SchemaEnum{bit_flags?: true} ->
+        # Decompose into flag list using the same logic the runtime decoder will.
+        import Bitwise
+        %SchemaEnum{variants: vs} = Schema.fetch(schema, fqn)
+        for {atom, v} <- vs, v != 0 and (n &&& v) == v, do: atom
+
+      _ ->
+        int_to_enum_atom(fqn, n, schema)
+    end
+  end
+
+  # Compile-time computation of the integer that corresponds to a
+  # decoded default for an enum field. Used as the `default` arg to
+  # Wire.add_field_scalar; the runtime compares value/1's result
+  # against this and omits the field when they match.
+  defp enum_default_int(%SchemaEnum{bit_flags?: true, variants: vs}, default)
+       when is_list(default) do
+    import Bitwise
+
+    Enum.reduce(default, 0, fn atom, acc ->
+      case Enum.find(vs, fn {n, _} -> n == atom end) do
+        {_, v} -> bor(acc, v)
+        nil -> acc
+      end
+    end)
+  end
+
+  defp enum_default_int(%SchemaEnum{variants: vs}, default) do
+    case Enum.find(vs, fn {n, _} -> n == default end) do
+      {_, v} -> v
+      nil -> 0
+    end
   end
 
   defp resolve_enum_ident(fqn, name, schema) do
@@ -577,18 +624,10 @@ defmodule Flatbuf.Codegen.Table do
         """
 
       {:enum, fqn} ->
-        %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
+        %SchemaEnum{underlying_type: u} = enum_rec = Schema.fetch(schema, fqn)
         default = default_value(f, schema)
         mod = fqn_to_module(fqn)
-
-        default_int =
-          case Schema.fetch(schema, fqn) do
-            %SchemaEnum{variants: vs} ->
-              case Enum.find(vs, fn {n, _} -> n == default end) do
-                {_, v} -> v
-                nil -> 0
-              end
-          end
+        default_int = enum_default_int(enum_rec, default)
 
         value_atom = "Map.get(value, #{inspect(f.name)}, #{inspect(default)})"
         value_expr = "#{mod}.value(#{value_atom})"

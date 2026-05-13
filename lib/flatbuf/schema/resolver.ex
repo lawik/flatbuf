@@ -219,8 +219,9 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp add_decl({:enum, body}, state) do
     fqn = qualify(body.name, state.namespace)
-
-    variants = compute_enum_values(body.variants)
+    attrs = normalize_attrs(body.attributes)
+    bit_flags? = Map.has_key?(attrs, :bit_flags)
+    variants = compute_enum_values(body.variants, bit_flags?)
 
     underlying =
       case body.underlying_type do
@@ -234,9 +235,9 @@ defmodule Flatbuf.Schema.Resolver do
       short_name: body.name,
       underlying_type: underlying,
       variants: variants,
-      attributes: normalize_attrs(body.attributes),
+      attributes: attrs,
       docs: body.docs,
-      bit_flags?: Map.has_key?(normalize_attrs(body.attributes), :bit_flags)
+      bit_flags?: bit_flags?
     }
 
     %{state | schema: put_type(state.schema, fqn, enum)}
@@ -499,8 +500,13 @@ defmodule Flatbuf.Schema.Resolver do
   end
 
   # Enum values -----------------------------------------------------------
+  #
+  # For regular enums the schema's `= N` is the variant value, and missing
+  # values increment from the previous one. For `(bit_flags)` enums the
+  # `= N` is interpreted as the *bit position* (so the actual value is
+  # `1 <<< N`); missing values still increment the position by one.
 
-  defp compute_enum_values(variants) do
+  defp compute_enum_values(variants, false) do
     {result, _next} =
       Enum.map_reduce(variants, 0, fn v, expected ->
         actual =
@@ -510,6 +516,24 @@ defmodule Flatbuf.Schema.Resolver do
           end
 
         {{String.to_atom(v.name), actual}, actual + 1}
+      end)
+
+    result
+  end
+
+  defp compute_enum_values(variants, true) do
+    import Bitwise
+
+    {result, _next} =
+      Enum.map_reduce(variants, 0, fn v, expected_shift ->
+        shift =
+          case v.value do
+            nil -> expected_shift
+            n -> n
+          end
+
+        value = 1 <<< shift
+        {{String.to_atom(v.name), value}, shift + 1}
       end)
 
     result

@@ -50,7 +50,8 @@ defmodule Flatbuf.MonsterDifferentialTest do
       assert decoded.name == "MyMonster"
       assert decoded.hp == 80
       assert decoded.mana == 150
-      assert decoded.color == :Blue
+      # Color is a (bit_flags) enum upstream — decoded values are lists.
+      assert decoded.color == [:Blue]
 
       assert decoded.pos.x == 1.0
       assert decoded.pos.y == 2.0
@@ -77,7 +78,8 @@ defmodule Flatbuf.MonsterDifferentialTest do
       assert decoded.name == "MyMonster"
       assert decoded.hp == 80
       assert decoded.mana == 150
-      assert decoded.color == :Blue
+      # Color is a (bit_flags) enum upstream — decoded values are lists.
+      assert decoded.color == [:Blue]
       assert decoded.inventory == [0, 1, 2, 3, 4]
       assert decoded.vector_of_longs == [1, 100, 10_000, 1_000_000, 100_000_000]
       assert decoded.testarrayofstring == ["test1", "test2"]
@@ -89,8 +91,8 @@ defmodule Flatbuf.MonsterDifferentialTest do
       assert decoded.pos.y == 2.0
       assert decoded.pos.z == 3.0
       assert decoded.pos.test1 == 3.0
-      # decoded.pos.test2 is a Color (bit_flags) enum — skipped, our
-      # resolver doesn't compute bit_flag values yet.
+      # Color is (bit_flags) — pos.test2 decodes to a flag list.
+      assert decoded.pos.test2 == [:Green]
 
       # decoded.pos.test3 is an inline Test struct.
       assert decoded.pos.test3.a == 5
