@@ -49,10 +49,26 @@ defmodule Flatbuf.Test.CodegenCompiler do
   @doc """
   Compile a list of `{module, source}` artifacts into the running VM
   as a single unit. Returns the loaded module atoms.
+
+  A per-VM cache (keyed by the combined source's hash) skips
+  recompilation when the same artifact set has already been loaded.
+  This silences the "redefining module …" warnings when many tests
+  run the same schema, and avoids redundant work.
   """
   def compile_artifacts!(artifacts) do
     combined = Enum.map_join(artifacts, "\n\n", fn {_mod, src} -> src end)
-    Code.compile_string(combined)
+    hash = :erlang.phash2(combined)
+    key = {__MODULE__, :compiled, hash}
+
+    case :persistent_term.get(key, :not_compiled) do
+      :compiled ->
+        :ok
+
+      :not_compiled ->
+        Code.compile_string(combined)
+        :persistent_term.put(key, :compiled)
+    end
+
     Enum.map(artifacts, &elem(&1, 0))
   end
 end

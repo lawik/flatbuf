@@ -27,9 +27,12 @@ defmodule Flatbuf.MonsterDifferentialTest do
 
     # Compile the upstream Monster schema at test-file compile time so
     # references like `MyGame.Example.Monster.decode/1` resolve.
+    # Wire module matches what `Flatbuf.Test.UpstreamFixtures` uses,
+    # so the CodegenCompiler cache hits across this test and the
+    # fixture-driven runs (no "redefining module" warnings).
     Flatbuf.Test.CodegenCompiler.compile_path!(@schema,
       include_paths: Upstream.include_paths(),
-      wire_module: Flatbuf.MonsterDifferentialTest.Wire
+      wire_module: Flatbuf.Fixture.Wire.MonsterTest
     )
 
     test "verify(monsterdata_test.mon) accepts the upstream buffer" do

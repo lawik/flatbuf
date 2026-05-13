@@ -188,7 +188,11 @@ defmodule Flatbuf.Test.UpstreamFixtures do
          ) do
       {:ok, schema} when is_binary(schema.root_type) ->
         try do
-          wire = Module.concat([Flatbuf.Fixture, Wire, String.to_atom(fixture.name)])
+          # Wire module is keyed by the *schema*, not the fixture, so
+          # all fixtures sharing a schema (e.g. the 8 Monster wire
+          # variants) reuse the same compiled artifacts via the
+          # CodegenCompiler cache instead of redefining everything.
+          wire = wire_module_for_schema(fixture.schema)
           CodegenCompiler.compile_schema!(schema, wire_module: wire)
           {:ok, Module.concat([fqn_to_module(schema.root_type)])}
         rescue
@@ -206,6 +210,19 @@ defmodule Flatbuf.Test.UpstreamFixtures do
 
   defp fqn_to_module(fqn) do
     Enum.map_join(String.split(fqn, "."), ".", &Macro.camelize/1)
+  end
+
+  # Deterministic wire-module atom derived from the schema's relative
+  # path. Reused across fixtures that share a schema so the
+  # CodegenCompiler cache hits.
+  defp wire_module_for_schema(rel_path) do
+    suffix =
+      rel_path
+      |> Path.rootname()
+      |> String.split(["/", "_", "-", "."])
+      |> Enum.map_join("", &Macro.camelize/1)
+
+    Module.concat([Flatbuf.Fixture, Wire, String.to_atom(suffix)])
   end
 
   # ----- binary acquisition ---------------------------------------------

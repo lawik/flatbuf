@@ -13,8 +13,6 @@ defmodule Flatbuf.Codegen.Wire do
   defmodule <%= MODULE %> do
     @moduledoc "Generated FlatBuffers wire helper. Do not edit by hand."
 
-    import Bitwise
-
     # ---------------------------------------------------------------------
     # Readers
     # ---------------------------------------------------------------------
@@ -146,6 +144,49 @@ defmodule Flatbuf.Codegen.Wire do
 
     @doc "Return the absolute position of element `i` in a vector at `pos`."
     def vector_elem_pos(pos, i, elem_size), do: pos + 4 + i * elem_size
+
+    @doc """
+    Binary-search a vector of `uoffset_t` (`[Table]`) by `target` key.
+
+    `key_fn` is `(buf, table_pos -> key_value)` — typically the
+    `__key_at__/2` getter the table generator emits for its `(key)`
+    field. Returns the matching table's absolute position, or `nil`.
+
+    Assumes the vector is already sorted ascending by key (the
+    FlatBuffers convention for `(key)`-marked fields).
+    """
+    def binary_search_offset_vector(buf, vec_pos, count, target, key_fn)
+        when is_function(key_fn, 2) do
+      do_binary_search(buf, vec_pos, 0, count - 1, target, key_fn)
+    end
+
+    defp do_binary_search(_buf, _vec_pos, lo, hi, _target, _key_fn) when lo > hi, do: nil
+
+    defp do_binary_search(buf, vec_pos, lo, hi, target, key_fn) do
+      mid = div(lo + hi, 2)
+      elem_pos = vector_elem_pos(vec_pos, mid, 4)
+      table_pos = follow_uoffset(buf, elem_pos)
+      key = key_fn.(buf, table_pos)
+
+      cond do
+        key == target -> table_pos
+        compare_keys(key, target) < 0 -> do_binary_search(buf, vec_pos, mid + 1, hi, target, key_fn)
+        true -> do_binary_search(buf, vec_pos, lo, mid - 1, target, key_fn)
+      end
+    end
+
+    # Three-way compare for arbitrary keys (numbers, strings, atoms).
+    # Returns negative / 0 / positive Erlang-style.
+    defp compare_keys(a, b) when is_binary(a) and is_binary(b) do
+      cond do
+        a < b -> -1
+        a > b -> 1
+        true -> 0
+      end
+    end
+
+    defp compare_keys(a, b) when is_number(a) and is_number(b), do: a - b
+    defp compare_keys(a, b), do: if(a < b, do: -1, else: if(a > b, do: 1, else: 0))
 
     # ---------------------------------------------------------------------
     # Verifier primitives — used by generated `verify/1` to bounds-check

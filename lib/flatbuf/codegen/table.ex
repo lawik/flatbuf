@@ -32,7 +32,13 @@ defmodule Flatbuf.Codegen.Table do
 
   defp do_generate(%Table{} = t, %Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
-    is_root? = schema.root_type == t.name
+    # Every table can serve as the root of a (possibly nested) buffer,
+    # so we always emit `decode/1`, `encode/1`, `verify/1`,
+    # `to_json/1`, and `from_json/1`. The schema's `root_type`
+    # declaration is a hint about the canonical root; it doesn't
+    # restrict which tables can act as roots.
+    is_root? = true
+    _ = schema.root_type
     module_name = fqn_to_module(t.name)
     module_atom = Module.concat([module_name])
 
@@ -252,7 +258,126 @@ defmodule Flatbuf.Codegen.Table do
   end
 
   defp build_accessors(t, schema) do
-    Enum.map_join(t.fields, "\n", fn f -> field_decoder(f, schema) end)
+    per_field =
+      Enum.map_join(t.fields, "\n", fn f ->
+        field_decoder(f, schema) <>
+          nested_flatbuffer_accessor(f, schema, t) <>
+          keyed_lookup_accessor(f, schema)
+      end)
+
+    per_field <> key_introspection(t)
+  end
+
+  # If this table has a `(key)`-marked field, expose:
+  #
+  # * `__flatbuf__(:key_field)` — the field's atom name.
+  # * `__key_at__(buf, pos)` — read the key value at a given table
+  #   position; used by `Wire.binary_search_offset_vector/5`.
+  defp key_introspection(t) do
+    case Enum.find(t.fields, fn f -> Map.get(f.attributes, :key, false) end) do
+      nil ->
+        ""
+
+      f ->
+        """
+
+          @doc false
+          def __flatbuf__(:key_field), do: #{inspect(f.name)}
+
+          @doc \"Read the table's key field (#{f.name}) at the given position.\"
+          def __key_at__(buf, pos), do: decode_field_#{f.name}(buf, pos)
+        """
+    end
+  end
+
+  # For each `[KeyedTable]` field on this table, emit a
+  # `find_<field>_by_<key>(buf, table_pos, target)` helper that binary
+  # -searches the (sorted-by-key) vector and returns the matching
+  # table's `decode_at/2` result, or `nil`.
+  defp keyed_lookup_accessor(f, schema) do
+    with {:vector, {:table, fqn}} <- f.type,
+         %Table{} = inner <- Schema.fetch(schema, fqn),
+         key_field when not is_nil(key_field) <-
+           Enum.find(inner.fields, fn kf -> Map.get(kf.attributes, :key, false) end) do
+      mod = fqn_to_module(fqn)
+
+      """
+
+        @doc \"Binary-search `#{f.name}` for the entry with `#{key_field.name} == target`. Returns the matching #{fqn_to_module(fqn)} struct or `nil`.\"
+        def find_#{f.name}_by_#{key_field.name}(buf, pos, target) do
+          case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+            0 ->
+              nil
+
+            o ->
+              vec_pos = Wire.follow_uoffset(buf, pos + o)
+              count = Wire.read_vector_count(buf, vec_pos)
+
+              case Wire.binary_search_offset_vector(buf, vec_pos, count, target, &#{mod}.__key_at__/2) do
+                nil -> nil
+                table_pos -> #{mod}.decode_at(buf, table_pos)
+              end
+          end
+        end
+      """
+    else
+      _ -> ""
+    end
+  end
+
+  # If a field is `[ubyte] (nested_flatbuffer: "Type")`, emit an extra
+  # `<field>_as_<short_type>(buf, pos)` accessor that grabs the byte
+  # vector as a contiguous binary slice and decodes it as the named
+  # type. Returns `{:ok, struct} | {:error, reason}` or `nil` if the
+  # field is absent.
+  defp nested_flatbuffer_accessor(f, schema, t) do
+    with {:vector, {:scalar, :u8}} <- f.type,
+         name when is_binary(name) <- Map.get(f.attributes, :nested_flatbuffer),
+         fqn when is_binary(fqn) <- resolve_nested_type(name, t.namespace, schema) do
+      mod = fqn_to_module(fqn)
+      short = fqn |> String.split(".") |> List.last() |> Macro.underscore()
+
+      """
+        @doc \"Decode the `#{f.name}` byte vector as a `#{fqn}` buffer.\"
+        def #{f.name}_as_#{short}(buf, pos) do
+          case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+            0 ->
+              nil
+
+            o ->
+              vec_pos = Wire.follow_uoffset(buf, pos + o)
+              count = Wire.read_vector_count(buf, vec_pos)
+              bytes = binary_part(buf, vec_pos + 4, count)
+              #{mod}.decode(bytes)
+          end
+        end
+      """
+    else
+      _ -> ""
+    end
+  end
+
+  # Resolve a name (possibly unqualified or dotted) against the
+  # schema's types by walking up the field's containing namespace —
+  # same logic as Resolver.lookup_name/3, duplicated to keep codegen
+  # self-contained.
+  defp resolve_nested_type(name, ns, schema) do
+    candidates =
+      cond do
+        is_nil(ns) -> [name]
+        String.contains?(name, ".") -> [name | ns_walk(ns, name)]
+        true -> ns_walk(ns, name) ++ [name]
+      end
+
+    Enum.find(candidates, fn fqn -> Map.has_key?(schema.types, fqn) end)
+  end
+
+  defp ns_walk(ns, name) do
+    parts = String.split(ns, ".")
+
+    for i <- length(parts)..1//-1 do
+      (Enum.take(parts, i) ++ [name]) |> Enum.join(".")
+    end
   end
 
   defp field_decoder(f, schema) do
@@ -909,6 +1034,41 @@ defmodule Flatbuf.Codegen.Table do
                 end)
         """
 
+      {:vector, {:union, fqn}} ->
+        # Vector-of-union: two parallel vectors. Bounds-check both,
+        # then dispatch each (discriminator, value) pair through the
+        # union module's `__verify_variant__/4`.
+        mod = fqn_to_module(fqn)
+        disc_slot = f.vtable_slot - 2
+
+        """
+        :ok <- (case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
+                  0 -> :ok
+                  type_o ->
+                    case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                      0 -> :ok
+                      value_o ->
+                        with {:ok, types_pos} <- Wire.verify_follow_uoffset(buf, pos + type_o),
+                             {:ok, vals_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o),
+                             {:ok, _} <- Wire.verify_vector_at(buf, types_pos, 1),
+                             {:ok, count} <- Wire.verify_vector_at(buf, vals_pos, 4) do
+                          Enum.reduce_while(0..(count - 1)//1, :ok, fn i, _ ->
+                            disc = Wire.read_u8(buf, Wire.vector_elem_pos(types_pos, i, 1))
+                            val_elem = Wire.vector_elem_pos(vals_pos, i, 4)
+                            case Wire.verify_follow_uoffset(buf, val_elem) do
+                              {:ok, abs_pos} ->
+                                case #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1) do
+                                  :ok -> {:cont, :ok}
+                                  err -> {:halt, err}
+                                end
+                              err -> {:halt, err}
+                            end
+                          end)
+                        end
+                    end
+                end)
+        """
+
       {:vector, inner} ->
         verify_vector_field(f, inner, schema)
 
@@ -1006,8 +1166,10 @@ defmodule Flatbuf.Codegen.Table do
        "(case Wire.verify_follow_uoffset(buf, elem_pos) do {:ok, tp} -> #{fqn_to_module(fqn)}.__verify_at__(buf, tp, depth - 1); e -> e end)"}
 
   defp vector_elem_verify({:union, _fqn}, _) do
-    # Vectors of unions need parallel type+value vectors — Phase 3.
-    {4, ":ok"}
+    # Vectors of unions are handled specially in verify_field/2 above
+    # (they take two parallel vtable slots). This clause shouldn't be
+    # reached, but kept for safety.
+    {4, "Wire.verify_bounds(buf, elem_pos, 4)"}
   end
 
   # -----------------------------------------------------------------------

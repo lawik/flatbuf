@@ -11,7 +11,7 @@
   "alignment_test" =>
     {:error, :flatc,
      {:flatc_failed,
-      "\nerror:\n  /tmp/flatbuf_oracle_3/input.json:2: 22: error: unknown field: small_structs\n\n"}},
+      "\nerror:\n  /tmp/flatbuf_oracle_2/input.json:2: 22: error: unknown field: small_structs\n\n"}},
   "annotated_binary" => :ok,
   "evolution_v1" => {:error, :flatc, {:flatc_no_json, ""}},
   "evolution_v2" => :ok,
