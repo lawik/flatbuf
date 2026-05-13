@@ -312,6 +312,18 @@ defmodule Flatbuf.Test.UpstreamFixtures do
   defp do_diff(a, b, _path) when is_integer(a) and is_float(b),
     do: if(a * 1.0 == b, do: :ok, else: {:value_diff, _ = nil, a, b})
 
+  defp do_diff(a, b, path) when is_float(a) and is_float(b) do
+    # Compare floats at f32 precision: if both values round to the
+    # same 4-byte little-endian f32 bit pattern, treat them as equal.
+    # This bridges the gap where flatc emits "3.1452" (shortest-f32
+    # round-trip) and our `<<v::little-float-32>>` decode widens that
+    # to 3.14520001411438 in f64 — both round to the same f32 bits,
+    # so they're "the same value" by FlatBuffers wire-format standards.
+    if <<a::little-float-32>> == <<b::little-float-32>>,
+      do: :ok,
+      else: {:value_diff, Enum.reverse(path), a, b}
+  end
+
   defp do_diff(a, b, path), do: {:value_diff, Enum.reverse(path), a, b}
 
   @doc "Path of the conformance-style manifest we maintain."

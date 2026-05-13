@@ -47,6 +47,7 @@ defmodule Flatbuf.Codegen.Table do
     json_top = build_json_top(is_root?)
     verify_body = build_verify_at(t, schema)
     verify_top = build_verify_top(is_root?)
+    always_emit_keys = always_emit_keys(t)
 
     # An empty table has nothing to read in decode_at; underscore the
     # params to avoid the "variable is unused" warning the compiler
@@ -79,7 +80,9 @@ defmodule Flatbuf.Codegen.Table do
       def __to_json_map__(value) when is_map(value) do
         Map.new([
     #{to_json_map_body}    ])
-        |> Map.reject(fn {_k, v} -> v == nil or v == [] end)
+        |> Map.reject(fn {k, v} ->
+          (v == nil or v == []) and k not in #{always_emit_keys}
+        end)
       end
 
       @doc false
@@ -282,6 +285,38 @@ defmodule Flatbuf.Codegen.Table do
                       disc = Wire.read_u8(buf, pos + type_o)
                       abs_pos = Wire.follow_uoffset(buf, pos + value_o)
                       #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                  end
+              end
+        """
+        |> String.trim_trailing()
+        |> Kernel.<>("\n")
+
+      {:vector, {:union, fqn}} ->
+        # Vectors of unions are stored as two parallel vectors in the
+        # vtable: a `[u8]` of discriminators at `vtable_slot - 2` and
+        # a `[uoffset]` of variant values at `vtable_slot`.
+        disc_slot = f.vtable_slot - 2
+
+        """
+              case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
+                0 -> []
+                type_o ->
+                  case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                    0 -> []
+                    value_o ->
+                      types_abs = Wire.follow_uoffset(buf, pos + type_o)
+                      values_abs = Wire.follow_uoffset(buf, pos + value_o)
+                      count = Wire.read_vector_count(buf, types_abs)
+                      if count == 0 do
+                        []
+                      else
+                        for i <- 0..(count - 1) do
+                          disc = Wire.read_u8(buf, Wire.vector_elem_pos(types_abs, i, 1))
+                          elem_pos = Wire.vector_elem_pos(values_abs, i, 4)
+                          abs_pos = Wire.follow_uoffset(buf, elem_pos)
+                          #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                        end
+                      end
                   end
               end
         """
@@ -501,6 +536,41 @@ defmodule Flatbuf.Codegen.Table do
 
         {var, line}
 
+      {:vector, {:union, fqn}} ->
+        # Two locals: the type vector's addr and the value vector's.
+        types_var = "addr_#{f.name}_types"
+        mod = fqn_to_module(fqn)
+
+        line = """
+            {b, #{types_var}, #{var}} =
+              case #{field_lookup} do
+                nil ->
+                  {b, nil, nil}
+
+                list when is_list(list) ->
+                  {pairs, b} =
+                    Enum.map_reduce(list, b, fn item, acc ->
+                      case item do
+                        nil ->
+                          {{0, nil}, acc}
+
+                        {variant_atom, variant_value} ->
+                          {acc2, addr} = #{mod}.build_variant(acc, variant_atom, variant_value)
+                          disc = #{mod}.discriminator(variant_atom)
+                          {{disc, addr}, acc2}
+                      end
+                    end)
+
+                  discs = Enum.map(pairs, &elem(&1, 0))
+                  addrs = Enum.map(pairs, &elem(&1, 1))
+                  {b, vals_addr} = Wire.create_offset_vector(b, addrs)
+                  {b, types_addr} = Wire.create_scalar_vector(b, discs, 1, 1, &Wire.push_u8/2)
+                  {b, types_addr, vals_addr}
+              end
+        """
+
+        {{:union_vec, types_var, var}, line}
+
       {:vector, inner} ->
         line = build_vector_prelude(var, field_lookup, inner, schema)
         {var, line}
@@ -634,13 +704,10 @@ defmodule Flatbuf.Codegen.Table do
         """
 
       {:union, _fqn} ->
-        # Phase 3: vector-of-unions needs two parallel vtable slots
-        # (a `[u8]` of discriminators and a `[uoffset]` of values).
-        # Stub the encoder so the surrounding table still compiles;
-        # nothing is actually written for these fields yet.
-        """
-            {b, #{var}} = {b, nil}
-        """
+        # Handled in build_subobject_for_field directly so it can
+        # expose both `addr_<name>_types` and `addr_<name>` to
+        # build_field_add. Should not reach here.
+        raise "vector-of-union handled in build_subobject_for_field"
     end
   end
 
@@ -687,6 +754,17 @@ defmodule Flatbuf.Codegen.Table do
 
         """
             b = Wire.add_field_offset(b, #{slot}, #{var})
+        """
+
+      {:vector, {:union, _}} ->
+        # Two parallel vtable slots: type vector at slot - 2, value
+        # vector at slot.
+        {:union_vec, types_var, values_var} = Map.get(addrs, f.name)
+        disc_slot = slot - 2
+
+        """
+            b = Wire.add_field_offset(b, #{slot}, #{values_var})
+            b = Wire.add_field_offset(b, #{disc_slot}, #{types_var})
         """
 
       {:vector, _} ->
@@ -754,6 +832,23 @@ defmodule Flatbuf.Codegen.Table do
   # -----------------------------------------------------------------------
   # Verifier
   # -----------------------------------------------------------------------
+
+  # JSON keys that the to_json_map must emit *even when nil*, matching
+  # flatc's behavior:
+  #
+  # * Optional scalar fields (`field: int = null`) — flatc emits
+  #   `"field": null` when the slot is absent from the vtable; our
+  #   decoder returns nil for those, and the reject filter would
+  #   otherwise drop the key entirely.
+  defp always_emit_keys(t) do
+    keys =
+      t.fields
+      |> Enum.reject(&Map.get(&1.attributes, :deprecated, false))
+      |> Enum.filter(fn f -> f.default == :null end)
+      |> Enum.map(fn f -> Atom.to_string(f.name) end)
+
+    inspect(keys)
+  end
 
   # True if any of the table's fields needs to recurse with `depth - 1`.
   # When false, the verifier's `depth` parameter is unused and the
@@ -940,6 +1035,15 @@ defmodule Flatbuf.Codegen.Table do
                 {#{key}, #{mod}.__to_json_value__(#{val})},
           """
 
+        {:vector, {:union, fqn}} ->
+          mod = fqn_to_module(fqn)
+          type_key = inspect(Atom.to_string(f.name) <> "_type")
+
+          """
+                {#{type_key}, Enum.map(#{val} || [], &#{mod}.__to_json_type__/1)},
+                {#{key}, Enum.map(#{val} || [], &#{mod}.__to_json_value__/1)},
+          """
+
         _ ->
           # Always emit scalars, enums, and structs (the value we
           # decoded — even when it's the schema default — matches
@@ -963,6 +1067,19 @@ defmodule Flatbuf.Codegen.Table do
           type_key = inspect(Atom.to_string(f.name) <> "_type")
 
           "      #{f.name}: #{mod}.__from_json__(Map.get(map, #{type_key}), Map.get(map, #{key})),\n"
+
+        {:vector, {:union, fqn}} ->
+          mod = fqn_to_module(fqn)
+          type_key = inspect(Atom.to_string(f.name) <> "_type")
+
+          """
+                #{f.name}:
+                  Enum.zip(
+                    Map.get(map, #{type_key}) || [],
+                    Map.get(map, #{key}) || []
+                  )
+                  |> Enum.map(fn {t, v} -> #{mod}.__from_json__(t, v) end),
+          """
 
         _ ->
           val = "Map.get(map, #{key})"

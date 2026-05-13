@@ -13,6 +13,8 @@ defmodule Flatbuf.Codegen.Wire do
   defmodule <%= MODULE %> do
     @moduledoc "Generated FlatBuffers wire helper. Do not edit by hand."
 
+    import Bitwise
+
     # ---------------------------------------------------------------------
     # Readers
     # ---------------------------------------------------------------------
@@ -68,14 +70,45 @@ defmodule Flatbuf.Codegen.Wire do
       v
     end
 
+    # NaN / Infinity have no Elixir-float representation that a
+    # `<<v::float-32>>` pattern can bind, so we sniff the raw bits
+    # before matching and return the corresponding atoms.
     def read_f32(buf, off) do
-      <<v::little-float-32>> = binary_part(buf, off, 4)
-      v
+      <<raw::little-32>> = binary_part(buf, off, 4)
+      f32_from_bits(raw)
     end
 
     def read_f64(buf, off) do
-      <<v::little-float-64>> = binary_part(buf, off, 8)
-      v
+      <<raw::little-64>> = binary_part(buf, off, 8)
+      f64_from_bits(raw)
+    end
+
+    defp f32_from_bits(0x7F800000), do: :infinity
+    defp f32_from_bits(0xFF800000), do: :neg_infinity
+
+    defp f32_from_bits(raw) do
+      # Any other exponent=255 pattern is a NaN.
+      if Bitwise.band(raw, 0x7F800000) == 0x7F800000 and Bitwise.band(raw, 0x007FFFFF) != 0 do
+        :nan
+      else
+        <<v::little-float-32>> = <<raw::little-32>>
+        v
+      end
+    end
+
+    defp f64_from_bits(0x7FF0000000000000), do: :infinity
+    defp f64_from_bits(0xFFF0000000000000), do: :neg_infinity
+
+    defp f64_from_bits(raw) do
+      exp_mask = 0x7FF0000000000000
+      mantissa_mask = 0x000FFFFFFFFFFFFF
+
+      if Bitwise.band(raw, exp_mask) == exp_mask and Bitwise.band(raw, mantissa_mask) != 0 do
+        :nan
+      else
+        <<v::little-float-64>> = <<raw::little-64>>
+        v
+      end
     end
 
     def read_bool(buf, off), do: read_u8(buf, off) != 0
