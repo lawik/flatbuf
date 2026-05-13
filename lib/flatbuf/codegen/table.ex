@@ -994,8 +994,20 @@ defmodule Flatbuf.Codegen.Table do
         default = default_value(f, schema)
         default_expr = literal_for_scalar(default, kind)
 
-        value_expr =
+        raw_value =
           "Map.get(value, #{inspect(f.name)}, #{inspect(default_value(f, schema))})"
+
+        # `(hash: "fnv1_32")` etc. lets the user pass a string in place
+        # of the int; the encoder hashes it on the way down. Integers
+        # pass through unchanged.
+        value_expr =
+          case Map.get(f.attributes, :hash) do
+            nil ->
+              raw_value
+
+            alg when is_binary(alg) ->
+              "Wire.maybe_hash(#{raw_value}, #{inspect(String.to_atom(alg))})"
+          end
 
         coerced =
           if kind == :bool do
@@ -1405,6 +1417,18 @@ defmodule Flatbuf.Codegen.Table do
         _ ->
           val = "Map.get(map, #{key})"
           expr = from_json_value_expr(f.type, val, schema)
+          # `(hash: "fnv1_32")` accepts a JSON string at the input side
+          # and hashes it. JSON values that are already integers pass
+          # through `Wire.maybe_hash/2` unchanged.
+          expr =
+            case Map.get(f.attributes, :hash) do
+              nil ->
+                expr
+
+              alg when is_binary(alg) ->
+                "Wire.maybe_hash(#{expr}, #{inspect(String.to_atom(alg))})"
+            end
+
           "      #{f.name}: #{expr},\n"
       end
     end)

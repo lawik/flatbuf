@@ -145,6 +145,63 @@ defmodule Flatbuf.Codegen.Wire do
     @doc "Return the absolute position of element `i` in a vector at `pos`."
     def vector_elem_pos(pos, i, elem_size), do: pos + 4 + i * elem_size
 
+    # ---------------------------------------------------------------------
+    # `(hash: "…")` attribute support
+    #
+    # An int/long field tagged with this attribute stores a hash of a
+    # string. On encode, users can pass either the already-computed
+    # integer or the source string; `maybe_hash/2` dispatches.
+    # ---------------------------------------------------------------------
+
+    @fnv32_offset 0x811C9DC5
+    @fnv32_prime 0x01000193
+    @fnv64_offset 0xCBF29CE484222325
+    @fnv64_prime 0x00000100000001B3
+    @u32_mask 0xFFFFFFFF
+    @u64_mask 0xFFFFFFFFFFFFFFFF
+
+    @doc "Pass-through for already-hashed integers; hash binaries with `alg`."
+    def maybe_hash(nil, _alg), do: nil
+    def maybe_hash(int, _alg) when is_integer(int), do: int
+    def maybe_hash(s, :fnv1_32) when is_binary(s), do: fnv1_32(s)
+    def maybe_hash(s, :fnv1a_32) when is_binary(s), do: fnv1a_32(s)
+    def maybe_hash(s, :fnv1_64) when is_binary(s), do: fnv1_64(s)
+    def maybe_hash(s, :fnv1a_64) when is_binary(s), do: fnv1a_64(s)
+
+    @doc "FNV-1 32-bit hash."
+    def fnv1_32(s) when is_binary(s) do
+      fnv1_loop(s, @fnv32_offset, @fnv32_prime, @u32_mask)
+    end
+
+    @doc "FNV-1a 32-bit hash."
+    def fnv1a_32(s) when is_binary(s) do
+      fnv1a_loop(s, @fnv32_offset, @fnv32_prime, @u32_mask)
+    end
+
+    @doc "FNV-1 64-bit hash."
+    def fnv1_64(s) when is_binary(s) do
+      fnv1_loop(s, @fnv64_offset, @fnv64_prime, @u64_mask)
+    end
+
+    @doc "FNV-1a 64-bit hash."
+    def fnv1a_64(s) when is_binary(s) do
+      fnv1a_loop(s, @fnv64_offset, @fnv64_prime, @u64_mask)
+    end
+
+    defp fnv1_loop(<<>>, acc, _prime, _mask), do: acc
+
+    defp fnv1_loop(<<b, rest::binary>>, acc, prime, mask) do
+      acc = Bitwise.band(acc * prime, mask) |> Bitwise.bxor(b)
+      fnv1_loop(rest, acc, prime, mask)
+    end
+
+    defp fnv1a_loop(<<>>, acc, _prime, _mask), do: acc
+
+    defp fnv1a_loop(<<b, rest::binary>>, acc, prime, mask) do
+      acc = Bitwise.band(Bitwise.bxor(acc, b) * prime, mask)
+      fnv1a_loop(rest, acc, prime, mask)
+    end
+
     @doc """
     Binary-search a vector of `uoffset_t` (`[Table]`) by `target` key.
 
