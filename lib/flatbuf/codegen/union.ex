@@ -29,6 +29,8 @@ defmodule Flatbuf.Codegen.Union do
     atom_clauses = build_atom_clauses(u)
     decode_clauses = build_decode_clauses(u, schema)
     build_clauses = build_build_clauses(u, schema)
+    to_json_clauses = build_to_json_clauses(u)
+    from_json_clauses = build_from_json_clauses(u)
 
     source = """
     defmodule #{module_name} do
@@ -62,7 +64,21 @@ defmodule Flatbuf.Codegen.Union do
       For `:NONE`, returns `{builder, nil}`.
       \"\"\"
       def build_variant(b, :NONE, _value), do: {b, nil}
-    #{build_clauses}end
+    #{build_clauses}
+      # JSON helpers — used by table codegen for the paired `_type` and
+      # value keys flatc emits.
+
+      @doc false
+      def __to_json_type__(nil), do: nil
+      def __to_json_type__({variant, _value}), do: Atom.to_string(variant)
+
+      @doc false
+      def __to_json_value__(nil), do: nil
+    #{to_json_clauses}
+      @doc false
+      def __from_json__(nil, _value), do: nil
+      def __from_json__("NONE", _value), do: nil
+    #{from_json_clauses}end
     """
 
     {module_atom, source}
@@ -131,6 +147,34 @@ defmodule Flatbuf.Codegen.Union do
         end
 
       "  def build_variant(b, #{inspect(name)}, value), do: #{body}\n"
+    end)
+  end
+
+  defp build_to_json_clauses(u) do
+    u.variants
+    |> Enum.map_join("", fn {name, type, _disc} ->
+      expr =
+        case type do
+          {:table, fqn} -> "#{fqn_to_module(fqn)}.__to_json_map__(value)"
+          {:struct, fqn} -> "#{fqn_to_module(fqn)}.__to_json_map__(value)"
+          :string -> "value"
+        end
+
+      "  def __to_json_value__({#{inspect(name)}, value}), do: #{expr}\n"
+    end)
+  end
+
+  defp build_from_json_clauses(u) do
+    u.variants
+    |> Enum.map_join("", fn {name, type, _disc} ->
+      expr =
+        case type do
+          {:table, fqn} -> "{#{inspect(name)}, #{fqn_to_module(fqn)}.__from_json_map__(value)}"
+          {:struct, fqn} -> "{#{inspect(name)}, #{fqn_to_module(fqn)}.__from_json_map__(value)}"
+          :string -> "{#{inspect(name)}, value}"
+        end
+
+      "  def __from_json__(#{inspect(Atom.to_string(name))}, value), do: #{expr}\n"
     end)
   end
 

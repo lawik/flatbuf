@@ -260,16 +260,67 @@ defmodule Flatbuf.Schema.Resolver do
 
     schema = %{schema | types: Map.new(schema.types, fn {k, v} -> {k, assign_slots(v)} end)}
 
-    schema = %{
-      schema
-      | types: Map.new(schema.types, fn {k, v} -> {k, compute_struct_layout(v, schema)} end)
-    }
+    # Struct layouts must be computed in dependency order — a struct
+    # containing another struct needs the inner one's `size`/`align` to
+    # be set first.
+    schema = layout_all_structs(schema)
 
     if schema.root_type && !Map.has_key?(schema.types, schema.root_type) do
       throw({:resolve_error, {:unknown_root_type, schema.root_type}})
     end
 
     schema
+  end
+
+  defp layout_all_structs(schema) do
+    structs = Schema.structs(schema)
+    graph = Map.new(structs, fn s -> {s.name, struct_deps(s)} end)
+    order = topo_sort(Map.keys(graph), graph)
+
+    Enum.reduce(order, schema, fn fqn, sch ->
+      case Schema.fetch(sch, fqn) do
+        nil -> sch
+        rec -> %{sch | types: Map.put(sch.types, fqn, compute_struct_layout(rec, sch))}
+      end
+    end)
+  end
+
+  defp struct_deps(%SchemaStruct{fields: fields}) do
+    Enum.flat_map(fields, &struct_field_deps(&1.type))
+  end
+
+  defp struct_field_deps({:struct, fqn}), do: [fqn]
+  defp struct_field_deps({:array, inner, _}), do: struct_field_deps(inner)
+  defp struct_field_deps(_), do: []
+
+  defp topo_sort(nodes, graph) do
+    {_, sorted} =
+      Enum.reduce(nodes, {MapSet.new(), []}, fn node, {seen, acc} ->
+        visit(node, graph, seen, acc, MapSet.new())
+      end)
+
+    Enum.reverse(sorted)
+  end
+
+  defp visit(node, graph, seen, acc, stack) do
+    cond do
+      MapSet.member?(stack, node) ->
+        throw({:resolve_error, {:struct_cycle, node}})
+
+      MapSet.member?(seen, node) ->
+        {seen, acc}
+
+      true ->
+        stack = MapSet.put(stack, node)
+        deps = Map.get(graph, node, [])
+
+        {seen, acc} =
+          Enum.reduce(deps, {seen, acc}, fn d, {s, a} ->
+            if Map.has_key?(graph, d), do: visit(d, graph, s, a, stack), else: {s, a}
+          end)
+
+        {MapSet.put(seen, node), [node | acc]}
+    end
   end
 
   defp resolve_refs(%Table{} = t, schema) do

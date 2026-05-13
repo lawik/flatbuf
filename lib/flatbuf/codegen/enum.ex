@@ -51,6 +51,27 @@ defmodule Flatbuf.Codegen.Enum do
 
       @doc false
       def __flatbuf__(:underlying_type), do: #{inspect(enum.underlying_type)}
+
+      # JSON helpers: flatc emits enum values as the variant name string.
+      @doc false
+      def __to_json__(atom) when is_atom(atom), do: Atom.to_string(atom)
+
+      def __to_json__(int) when is_integer(int) do
+        case from_value(int) do
+          nil -> int
+          atom -> Atom.to_string(atom)
+        end
+      end
+
+      @doc false
+      def __from_json__(name) when is_binary(name) do
+        atom = String.to_atom(name)
+        if atom in all(), do: atom, else: raise("unknown #{enum.name} variant: " <> name)
+      end
+
+      def __from_json__(int) when is_integer(int) do
+        from_value(int) || raise("unknown #{enum.name} value: " <> Integer.to_string(int))
+      end
     end
     """
 

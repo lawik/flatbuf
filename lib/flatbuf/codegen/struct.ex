@@ -22,6 +22,8 @@ defmodule Flatbuf.Codegen.Struct do
     decode_body = build_decode(s, schema, wire_module)
     encode_body = build_encode(s, schema)
     array_helpers = build_array_helpers(s, schema)
+    to_json_body = build_to_json_map(s, schema)
+    from_json_body = build_from_json_map(s, schema)
 
     source = """
     defmodule #{module_name} do
@@ -48,6 +50,18 @@ defmodule Flatbuf.Codegen.Struct do
       def encode(value) do
         _ = value
     #{encode_body}  end
+
+      @doc false
+      def __to_json_map__(value) when is_map(value) do
+        %{
+    #{to_json_body}    }
+      end
+
+      @doc false
+      def __from_json_map__(map) when is_map(map) do
+        %__MODULE__{
+    #{from_json_body}    }
+      end
 
     #{array_helpers}end
     """
@@ -145,18 +159,13 @@ defmodule Flatbuf.Codegen.Struct do
 
   defp build_encode(s, schema) do
     # Build the binary in source-declared order using pure binary syntax.
+    # Padding is emitted as a `0::size(N)` bit-spec — not a nested
+    # binary literal, which Elixir parses as a `>>` operator soup.
     binary_parts =
       Enum.map(s.layout, fn entry ->
         f = entry.field
         pad = entry.offset - inferred_pos(s.layout, entry)
-
-        pad_part =
-          if pad > 0 do
-            "<<0::size(#{pad * 8})>>"
-          else
-            ""
-          end
-
+        pad_part = if pad > 0, do: "0::size(#{pad * 8})", else: ""
         value_part = encode_field_part(f, schema)
 
         case pad_part do
@@ -166,13 +175,7 @@ defmodule Flatbuf.Codegen.Struct do
       end)
 
     tail_pad = s.size - tail_offset_after_last(s.layout)
-
-    tail =
-      if tail_pad > 0 do
-        ", <<0::size(#{tail_pad * 8})>>"
-      else
-        ""
-      end
+    tail = if tail_pad > 0, do: ", 0::size(#{tail_pad * 8})", else: ""
 
     "    <<" <>
       Enum.join(binary_parts, ", ") <> tail <> ">>" <> "\n  "
@@ -292,6 +295,59 @@ defmodule Flatbuf.Codegen.Struct do
 
   defp array_elem_bin({:struct, fqn}, var, _),
     do: "#{fqn_to_module(fqn)}.encode(#{var})"
+
+  # ----------------------------------------------------------------------
+  # JSON map builders
+  # ----------------------------------------------------------------------
+
+  defp build_to_json_map(s, schema) do
+    Enum.map_join(s.fields, "", fn f ->
+      val = "Map.get(value, #{inspect(f.name)})"
+      expr = json_value_expr(f.type, val, schema)
+      "      #{inspect(Atom.to_string(f.name))} => #{expr},\n"
+    end)
+  end
+
+  defp build_from_json_map(s, schema) do
+    Enum.map_join(s.fields, "", fn f ->
+      val = "Map.get(map, #{inspect(Atom.to_string(f.name))})"
+      expr = json_from_value_expr(f.type, val, schema)
+      "      #{f.name}: #{expr},\n"
+    end)
+  end
+
+  defp json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
+    # NaN/Inf aren't valid JSON; emit as strings the way flatc does.
+    "case #{val} do :nan -> \"nan\"; :infinity -> \"inf\"; :neg_infinity -> \"-inf\"; v -> v end"
+  end
+
+  defp json_value_expr({:scalar, _}, val, _), do: val
+  defp json_value_expr({:enum, fqn}, val, _), do: "#{fqn_to_module(fqn)}.__to_json__(#{val})"
+
+  defp json_value_expr({:struct, fqn}, val, _),
+    do: "#{fqn_to_module(fqn)}.__to_json_map__(#{val})"
+
+  defp json_value_expr({:array, inner, _n}, val, schema) do
+    inner_expr = json_value_expr(inner, "v", schema)
+    "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
+  end
+
+  defp json_from_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
+    "case #{val} do \"nan\" -> :nan; \"inf\" -> :infinity; \"-inf\" -> :neg_infinity; v -> v end"
+  end
+
+  defp json_from_value_expr({:scalar, _}, val, _), do: val
+
+  defp json_from_value_expr({:enum, fqn}, val, _),
+    do: "#{fqn_to_module(fqn)}.__from_json__(#{val})"
+
+  defp json_from_value_expr({:struct, fqn}, val, _),
+    do: "#{fqn_to_module(fqn)}.__from_json_map__(#{val})"
+
+  defp json_from_value_expr({:array, inner, _n}, val, schema) do
+    inner_expr = json_from_value_expr(inner, "v", schema)
+    "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
+  end
 
   defp scalar_bin_spec(:bool), do: "8"
   defp scalar_bin_spec(:u8), do: "8"

@@ -184,7 +184,21 @@ defmodule Flatbuf.Codegen.Wire do
     def push_i32(b, v), do: b |> align(4) |> push_raw(<<v::little-signed-32>>)
     def push_u64(b, v), do: b |> align(8) |> push_raw(<<v::little-64>>)
     def push_i64(b, v), do: b |> align(8) |> push_raw(<<v::little-signed-64>>)
+    # NaN/Infinity have no regular-float representation in Erlang, so we
+    # write the canonical IEEE 754 bit pattern directly.
+    def push_f32(b, :nan), do: b |> align(4) |> push_raw(<<0x7FC00000::little-32>>)
+    def push_f32(b, :infinity), do: b |> align(4) |> push_raw(<<0x7F800000::little-32>>)
+    def push_f32(b, :neg_infinity), do: b |> align(4) |> push_raw(<<0xFF800000::little-32>>)
     def push_f32(b, v), do: b |> align(4) |> push_raw(<<v::little-float-32>>)
+
+    def push_f64(b, :nan), do: b |> align(8) |> push_raw(<<0x7FF8000000000000::little-64>>)
+
+    def push_f64(b, :infinity),
+      do: b |> align(8) |> push_raw(<<0x7FF0000000000000::little-64>>)
+
+    def push_f64(b, :neg_infinity),
+      do: b |> align(8) |> push_raw(<<0xFFF0000000000000::little-64>>)
+
     def push_f64(b, v), do: b |> align(8) |> push_raw(<<v::little-float-64>>)
     def push_bool(b, v), do: push_u8(b, if(v, do: 1, else: 0))
 

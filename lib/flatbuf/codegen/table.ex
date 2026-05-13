@@ -29,6 +29,9 @@ defmodule Flatbuf.Codegen.Table do
     accessor_funs = build_accessors(t, schema)
     build_body = build_encode_build(t, schema)
     encode_funs = build_encode_top(t, is_root?)
+    to_json_map_body = build_to_json_map(t, schema)
+    from_json_map_body = build_from_json_map(t, schema)
+    json_top = build_json_top(is_root?)
 
     source = """
     defmodule #{module_name} do
@@ -38,7 +41,7 @@ defmodule Flatbuf.Codegen.Table do
 
       defstruct #{defstruct_fields}
       @type t :: #{type_spec}
-    #{encode_funs}
+    #{encode_funs}#{json_top}
       @doc "Decode a table at absolute position `pos` within `buf`."
       @spec decode_at(binary(), non_neg_integer()) :: t()
       def decode_at(buf, pos) do
@@ -49,6 +52,19 @@ defmodule Flatbuf.Codegen.Table do
       @doc "Build this table inside an existing builder. Returns `{builder, addr}`."
       def build(builder, value) when is_map(value) do
     #{build_body}  end
+
+      @doc false
+      def __to_json_map__(value) when is_map(value) do
+        Map.new([
+    #{to_json_map_body}    ])
+        |> Map.reject(fn {_k, v} -> v == nil end)
+      end
+
+      @doc false
+      def __from_json_map__(map) when is_map(map) do
+        %__MODULE__{
+    #{from_json_map_body}    }
+      end
 
     #{accessor_funs}end
     """
@@ -287,6 +303,30 @@ defmodule Flatbuf.Codegen.Table do
           {builder, root_addr} = build(builder, value)
           builder = Wire.finish(builder, root_addr)
           {:ok, Wire.to_binary(builder)}
+        end
+      """
+    else
+      ""
+    end
+  end
+
+  defp build_json_top(is_root?) do
+    if is_root? do
+      """
+
+        @doc \"Encode this table as a JSON string (flatc-compatible shape).\"
+        @spec to_json(t() | map()) :: binary()
+        def to_json(value) when is_map(value) do
+          value |> __to_json_map__() |> JSON.encode!() |> IO.iodata_to_binary()
+        end
+
+        @doc \"Decode a JSON string into this table's struct.\"
+        @spec from_json(binary()) :: {:ok, t()} | {:error, term()}
+        def from_json(json) when is_binary(json) do
+          case JSON.decode(json) do
+            {:ok, map} -> {:ok, __from_json_map__(map)}
+            err -> err
+          end
         end
       """
     else
@@ -592,6 +632,96 @@ defmodule Flatbuf.Codegen.Table do
   defp literal_for_scalar(v, _kind) when is_number(v), do: v
   defp literal_for_scalar(v, _kind) when is_boolean(v), do: if(v, do: 1, else: 0)
   defp literal_for_scalar(nil, _kind), do: 0
+  # NaN/Infinity default literals — emit them as atoms; the wire helper
+  # writes the IEEE 754 bit pattern when these come through push_f32/f64.
+  defp literal_for_scalar(atom, _kind) when atom in [:nan, :infinity, :neg_infinity], do: atom
+
+  # -----------------------------------------------------------------------
+  # JSON map builders
+  # -----------------------------------------------------------------------
+
+  defp build_to_json_map(t, schema) do
+    Enum.map_join(t.fields, "", fn f ->
+      key = inspect(Atom.to_string(f.name))
+      val = "Map.get(value, #{inspect(f.name)})"
+
+      case f.type do
+        {:union, fqn} ->
+          mod = fqn_to_module(fqn)
+          type_key = inspect(Atom.to_string(f.name) <> "_type")
+
+          """
+                {#{type_key}, #{mod}.__to_json_type__(#{val})},
+                {#{key}, #{mod}.__to_json_value__(#{val})},
+          """
+
+        _ ->
+          expr = to_json_value_expr(f.type, val, schema)
+          "      {#{key}, #{expr}},\n"
+      end
+    end)
+  end
+
+  defp build_from_json_map(t, schema) do
+    Enum.map_join(t.fields, "", fn f ->
+      key = inspect(Atom.to_string(f.name))
+
+      case f.type do
+        {:union, fqn} ->
+          mod = fqn_to_module(fqn)
+          type_key = inspect(Atom.to_string(f.name) <> "_type")
+
+          "      #{f.name}: #{mod}.__from_json__(Map.get(map, #{type_key}), Map.get(map, #{key})),\n"
+
+        _ ->
+          val = "Map.get(map, #{key})"
+          expr = from_json_value_expr(f.type, val, schema)
+          "      #{f.name}: #{expr},\n"
+      end
+    end)
+  end
+
+  defp to_json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
+    "case #{val} do :nan -> \"nan\"; :infinity -> \"inf\"; :neg_infinity -> \"-inf\"; v -> v end"
+  end
+
+  defp to_json_value_expr({:scalar, _}, val, _), do: val
+  defp to_json_value_expr(:string, val, _), do: val
+
+  defp to_json_value_expr({:enum, fqn}, val, _),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__to_json__(#{val}))"
+
+  defp to_json_value_expr({:struct, fqn}, val, _),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__to_json_map__(#{val}))"
+
+  defp to_json_value_expr({:table, fqn}, val, _),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__to_json_map__(#{val}))"
+
+  defp to_json_value_expr({:vector, inner}, val, schema) do
+    inner_expr = to_json_value_expr(inner, "v", schema)
+    "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
+  end
+
+  defp from_json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
+    "case #{val} do \"nan\" -> :nan; \"inf\" -> :infinity; \"-inf\" -> :neg_infinity; v -> v end"
+  end
+
+  defp from_json_value_expr({:scalar, _}, val, _), do: val
+  defp from_json_value_expr(:string, val, _), do: val
+
+  defp from_json_value_expr({:enum, fqn}, val, _),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__from_json__(#{val}))"
+
+  defp from_json_value_expr({:struct, fqn}, val, _),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__from_json_map__(#{val}))"
+
+  defp from_json_value_expr({:table, fqn}, val, _),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__from_json_map__(#{val}))"
+
+  defp from_json_value_expr({:vector, inner}, val, schema) do
+    inner_expr = from_json_value_expr(inner, "v", schema)
+    "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
+  end
 
   # -----------------------------------------------------------------------
   # Misc
