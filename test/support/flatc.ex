@@ -218,31 +218,46 @@ defmodule Flatbuf.Test.Flatc do
 
   @doc """
   Convert a FlatBuffers binary to a decoded JSON term using `flatc --json`.
+
+  Options:
+
+    * `:include_paths` — extra `-I` directories for schemas that
+      `include` other files.
   """
-  def binary_to_json(schema_path, binary) when is_binary(binary) do
+  def binary_to_json(schema_path, binary, opts \\ []) when is_binary(binary) do
     with {:ok, dir} <- tmp_dir(),
          bin_path = Path.join(dir, "input.bin"),
          :ok <- File.write(bin_path, binary),
          {out, _} <-
            System.cmd(
              ensure_available!(),
-             [
-               "--json",
-               "--raw-binary",
-               "--strict-json",
-               "--no-warnings",
-               "-o",
-               dir,
-               schema_path,
-               "--",
-               bin_path
-             ],
+             include_args(opts) ++
+               [
+                 "--json",
+                 "--raw-binary",
+                 "--strict-json",
+                 "--defaults-json",
+                 "--no-warnings",
+                 "-o",
+                 dir,
+                 schema_path,
+                 "--",
+                 bin_path
+               ],
              stderr_to_stdout: true
            ) do
+      # flatc always outputs JSON as `<basename>.json`, but we wrote
+      # the *input* binary as input.bin — flatc reads it via `--`
+      # and emits input.json. If it didn't, surface the stderr.
       json_path = Path.join(dir, "input.json")
 
       case File.read(json_path) do
         {:ok, json} ->
+          # flatc emits bare `nan` / `inf` / `-inf` even with
+          # --strict-json — those aren't valid JSON literals, so the
+          # standard library decoder rejects them. Quote them into
+          # strings to match what we emit on the Elixir side.
+          json = normalize_flatc_floats(json)
           {:ok, JSON.decode!(json)}
 
         {:error, _} ->
@@ -253,28 +268,65 @@ defmodule Flatbuf.Test.Flatc do
     cleanup_tmp()
   end
 
+  defp normalize_flatc_floats(json) do
+    # flatc emits `nan`, `inf`, and `-inf` as bare tokens (not valid
+    # JSON). Quote them into the same string form we use in our own
+    # `__to_json_map__`. The negative-lookbehind / lookahead guards
+    # keep us from chewing up field names like `infinity_default` or
+    # touching the same `inf` twice after the `-inf` pass.
+    json
+    |> String.replace(~r/(?<![\w"\-])-inf(?![\w"])/, "\"-inf\"")
+    |> String.replace(~r/(?<![\w"\-])inf(?![\w"])/, "\"inf\"")
+    |> String.replace(~r/(?<![\w"])nan(?![\w"])/, "\"nan\"")
+  end
+
   @doc """
   Convert a JSON encoding to a binary buffer via `flatc --binary`.
+
+  Accepts both strict and lax JSON (flatc's default mode), so upstream
+  fixtures with unquoted keys parse cleanly.
+
+  Options:
+
+    * `:include_paths` — extra `-I` directories for schemas that
+      `include` other files.
   """
-  def json_to_binary(schema_path, json) when is_binary(json) do
+  def json_to_binary(schema_path, json, opts \\ []) when is_binary(json) do
     with {:ok, dir} <- tmp_dir(),
          json_path = Path.join(dir, "input.json"),
          :ok <- File.write(json_path, json),
          {out, code} <-
            System.cmd(
              ensure_available!(),
-             ["--binary", "--strict-json", "--no-warnings", "-o", dir, schema_path, json_path],
+             include_args(opts) ++
+               ["--binary", "--no-warnings", "-o", dir, schema_path, json_path],
              stderr_to_stdout: true
            ) do
-      bin_path = Path.join(dir, "input.bin")
-
       cond do
-        code != 0 -> {:error, {:flatc_failed, out}}
-        true -> File.read(bin_path)
+        code != 0 ->
+          {:error, {:flatc_failed, out}}
+
+        true ->
+          # flatc names the output `<basename>.<file_extension>`, where
+          # file_extension comes from the schema's `file_extension`
+          # directive (default `bin`). Read whichever input.* file it
+          # produced.
+          case Path.wildcard(Path.join(dir, "input.*")) |> Enum.reject(&(&1 == json_path)) do
+            [bin_path] -> File.read(bin_path)
+            [] -> {:error, {:flatc_no_output, out}}
+            many -> {:error, {:flatc_ambiguous, many}}
+          end
       end
     end
   after
     cleanup_tmp()
+  end
+
+  defp include_args(opts) do
+    case Keyword.get(opts, :include_paths, []) do
+      [] -> []
+      paths -> Enum.flat_map(paths, &["-I", &1])
+    end
   end
 
   defp tmp_dir do

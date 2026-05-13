@@ -79,7 +79,11 @@ defmodule Flatbuf.Codegen.Union do
       # value keys flatc emits.
 
       @doc false
-      def __to_json_type__(nil), do: nil
+      # flatc emits the union `_type` key as `"NONE"` (not omitted) when
+      # the discriminator is 0, so match that to keep JSON comparisons
+      # aligned. The value side stays nil and gets dropped by the
+      # caller's `Map.reject`.
+      def __to_json_type__(nil), do: "NONE"
       def __to_json_type__({variant, _value}), do: Atom.to_string(variant)
 
       @doc false

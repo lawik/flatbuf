@@ -66,7 +66,7 @@ defmodule Flatbuf.Codegen.Table do
       def __to_json_map__(value) when is_map(value) do
         Map.new([
     #{to_json_map_body}    ])
-        |> Map.reject(fn {_k, v} -> v == nil end)
+        |> Map.reject(fn {_k, v} -> v == nil or v == [] end)
       end
 
       @doc false
@@ -132,10 +132,16 @@ defmodule Flatbuf.Codegen.Table do
   defp default_value(f, schema) do
     case {f.type, f.default} do
       {{:scalar, kind}, nil} -> Schema.scalar_default(kind)
+      # `= null` marks the field optional. Until we wire full presence
+      # tracking through the decoder, treat it as "absent default":
+      # the struct field is nil and our JSON output omits it (matching
+      # flatc's behavior for missing optional scalars).
+      {{:scalar, _}, :null} -> nil
       {{:scalar, _}, {:int, n}} -> n
       {{:scalar, _}, {:float, f}} -> f
       {{:scalar, _}, {:bool, b}} -> b
       {{:enum, fqn}, nil} -> default_enum_value(fqn, schema)
+      {{:enum, _}, :null} -> nil
       {{:enum, fqn}, {:ident, name}} -> explicit_enum_default(fqn, name, schema)
       {{:enum, fqn}, {:int, n}} -> int_enum_default(fqn, n, schema)
       {:string, _} -> nil
@@ -324,6 +330,13 @@ defmodule Flatbuf.Codegen.Table do
         {:table, fqn} ->
           {4, 4,
            "#{fqn_to_module(fqn)}.decode_at(buf, Wire.follow_uoffset(buf, Wire.vector_elem_pos(abs, i, 4)))"}
+
+        {:union, _fqn} ->
+          # Vectors of unions are Phase 3 — they use two parallel
+          # vtable slots (a `[u8]` of discriminators and a `[uoffset]`
+          # of values). Emit a stub that decodes to nil so the table's
+          # other fields still work; full support comes later.
+          {4, 4, "nil"}
       end
 
     _ = elem_size
@@ -606,6 +619,15 @@ defmodule Flatbuf.Codegen.Table do
                   Wire.end_vector(b2, count)
               end
         """
+
+      {:union, _fqn} ->
+        # Phase 3: vector-of-unions needs two parallel vtable slots
+        # (a `[u8]` of discriminators and a `[uoffset]` of values).
+        # Stub the encoder so the surrounding table still compiles;
+        # nothing is actually written for these fields yet.
+        """
+            {b, #{var}} = {b, nil}
+        """
     end
   end
 
@@ -885,7 +907,13 @@ defmodule Flatbuf.Codegen.Table do
   # -----------------------------------------------------------------------
 
   defp build_to_json_map(t, schema) do
-    Enum.map_join(t.fields, "", fn f ->
+    t.fields
+    # `(deprecated)` fields are intentionally dropped from JSON
+    # output — flatc does this, so matching means our output stays
+    # comparable across binaries that include those slots in the
+    # vtable for backwards compatibility.
+    |> Enum.reject(&Map.get(&1.attributes, :deprecated, false))
+    |> Enum.map_join("", fn f ->
       key = inspect(Atom.to_string(f.name))
       val = "Map.get(value, #{inspect(f.name)})"
 
@@ -900,6 +928,12 @@ defmodule Flatbuf.Codegen.Table do
           """
 
         _ ->
+          # Always emit scalars, enums, and structs (the value we
+          # decoded — even when it's the schema default — matches
+          # flatc's output when run with `--defaults-json`). Nil and
+          # empty-list values get filtered out at the end of
+          # `__to_json_map__`, which mirrors flatc omitting fields
+          # genuinely absent from the vtable.
           expr = to_json_value_expr(f.type, val, schema)
           "      {#{key}, #{expr}},\n"
       end
@@ -926,7 +960,7 @@ defmodule Flatbuf.Codegen.Table do
   end
 
   defp to_json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
-    "case #{val} do :nan -> \"nan\"; :infinity -> \"inf\"; :neg_infinity -> \"-inf\"; v -> v end"
+    "(case #{val} do :nan -> \"nan\"; :infinity -> \"inf\"; :neg_infinity -> \"-inf\"; v -> v end)"
   end
 
   defp to_json_value_expr({:scalar, _}, val, _), do: val
@@ -946,8 +980,11 @@ defmodule Flatbuf.Codegen.Table do
     "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
   end
 
+  # Phase 3 stub — vectors of unions emit nothing.
+  defp to_json_value_expr({:union, _}, _val, _schema), do: "nil"
+
   defp from_json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
-    "case #{val} do \"nan\" -> :nan; \"inf\" -> :infinity; \"-inf\" -> :neg_infinity; v -> v end"
+    "(case #{val} do \"nan\" -> :nan; \"inf\" -> :infinity; \"-inf\" -> :neg_infinity; v -> v end)"
   end
 
   defp from_json_value_expr({:scalar, _}, val, _), do: val
@@ -966,6 +1003,8 @@ defmodule Flatbuf.Codegen.Table do
     inner_expr = from_json_value_expr(inner, "v", schema)
     "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
   end
+
+  defp from_json_value_expr({:union, _}, _val, _schema), do: "nil"
 
   # -----------------------------------------------------------------------
   # Misc

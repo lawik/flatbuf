@@ -136,6 +136,8 @@ defmodule Flatbuf.Codegen.Enum do
       def __flatbuf__(:bit_flags?), do: true
 
       @doc false
+      # Empty flag set: flatc emits `0` (integer), not an empty string.
+      def __to_json__([]), do: 0
       def __to_json__(list) when is_list(list), do: Enum.map_join(list, " ", &Atom.to_string/1)
       def __to_json__(int) when is_integer(int), do: __to_json__(from_value(int))
 

@@ -79,10 +79,11 @@ defmodule Flatbuf.JsonRoundtripTest do
     {:ok, parsed} = JSON.decode(json)
 
     assert parsed["name"] == "Goblin"
-    # No pos, no inventory, no primary.
     refute Map.has_key?(parsed, "pos")
     refute Map.has_key?(parsed, "primary")
-    refute Map.has_key?(parsed, "primary_type")
+    # Union discriminator: absent → "NONE" string (matches flatc's
+    # JSON output, which always emits the `_type` slot).
+    assert parsed["primary_type"] == "NONE"
   end
 
   test "wire and JSON paths agree on the same value" do

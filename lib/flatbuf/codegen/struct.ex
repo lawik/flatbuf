@@ -318,7 +318,7 @@ defmodule Flatbuf.Codegen.Struct do
 
   defp json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
     # NaN/Inf aren't valid JSON; emit as strings the way flatc does.
-    "case #{val} do :nan -> \"nan\"; :infinity -> \"inf\"; :neg_infinity -> \"-inf\"; v -> v end"
+    "(case #{val} do :nan -> \"nan\"; :infinity -> \"inf\"; :neg_infinity -> \"-inf\"; v -> v end)"
   end
 
   defp json_value_expr({:scalar, _}, val, _), do: val
@@ -333,7 +333,7 @@ defmodule Flatbuf.Codegen.Struct do
   end
 
   defp json_from_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
-    "case #{val} do \"nan\" -> :nan; \"inf\" -> :infinity; \"-inf\" -> :neg_infinity; v -> v end"
+    "(case #{val} do \"nan\" -> :nan; \"inf\" -> :infinity; \"-inf\" -> :neg_infinity; v -> v end)"
   end
 
   defp json_from_value_expr({:scalar, _}, val, _), do: val
