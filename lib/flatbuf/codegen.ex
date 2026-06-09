@@ -56,6 +56,18 @@ defmodule Flatbuf.Codegen do
     tables =
       Enum.map(Schema.tables(schema), &Codegen.Table.generate(&1, schema, codegen_opts))
 
-    wire ++ enums ++ structs ++ unions ++ tables
+    Enum.map(wire ++ enums ++ structs ++ unions ++ tables, fn {mod, source} ->
+      {mod, format_source(source)}
+    end)
+  end
+
+  # Pipe each emitted source through `Code.format_string!/1`. The
+  # template-and-EEx flavor of codegen here happily produces
+  # inconsistent indentation, bracketed keyword lists, and
+  # 700-char-wide type specs — running the formatter once at the
+  # end is much cheaper than getting every emit site to do the
+  # right thing.
+  defp format_source(source) do
+    IO.iodata_to_binary([Code.format_string!(source), ?\n])
   end
 end

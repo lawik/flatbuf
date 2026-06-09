@@ -37,8 +37,6 @@ defmodule Flatbuf.Codegen.Table do
     # `to_json/1`, and `from_json/1`. The schema's `root_type`
     # declaration is a hint about the canonical root; it doesn't
     # restrict which tables can act as roots.
-    is_root? = true
-    _ = schema.root_type
     module_name = fqn_to_module(t.name)
     module_atom = Module.concat([module_name])
 
@@ -49,17 +47,17 @@ defmodule Flatbuf.Codegen.Table do
     decode_at_body = build_decode_at(t, schema)
     accessor_funs = build_accessors(t, schema)
     build_body = build_encode_build(t, schema)
-    encode_funs = build_encode_top(t, is_root?, schema.file_identifier)
+    encode_funs = build_encode_top(schema.file_identifier)
     to_json_map_body = build_to_json_map(t, schema)
     from_json_map_body = build_from_json_map(t, schema)
-    json_top = build_json_top(is_root?)
+    json_top = build_json_top()
     verify_body = build_verify_at(t, schema)
-    verify_top = build_verify_top(is_root?, schema.file_identifier)
+    verify_top = build_verify_top()
     always_emit_keys = always_emit_keys(t)
     required_check = build_required_check(t)
     file_id_funs = build_file_identifier_funs(schema.file_identifier)
-    behaviour_decl = build_behaviour_decl(is_root?, niceties)
-    derives = build_derive_attrs(is_root?, niceties)
+    behaviour_decl = build_behaviour_decl(niceties)
+    derives = build_derive_attrs(niceties)
 
     # An empty table has nothing to read in decode_at; underscore the
     # params to avoid the "variable is unused" warning the compiler
@@ -184,6 +182,7 @@ defmodule Flatbuf.Codegen.Table do
     case Schema.fetch(schema, fqn) do
       %SchemaEnum{bit_flags?: true} -> []
       %SchemaEnum{variants: [{name, _} | _]} -> name
+      %SchemaEnum{variants: []} -> nil
     end
   end
 
@@ -540,7 +539,7 @@ defmodule Flatbuf.Codegen.Table do
   # Encode (top-level)
   # -----------------------------------------------------------------------
 
-  defp build_encode_top(_t, true, file_id) do
+  defp build_encode_top(file_id) do
     finish_opts =
       case file_id do
         nil -> "[]"
@@ -555,13 +554,21 @@ defmodule Flatbuf.Codegen.Table do
 
     """
 
-      @doc \"Decode a buffer whose root is this table.\"
-      @spec decode(binary()) :: {:ok, t()} | {:error, term()}
+      @doc \"\"\"
+      Decode a buffer whose root is this table.
+
+      Returns `{:ok, t()}` on success or `{:error, {:malformed_buffer, exception}}`
+      if the buffer is truncated or has out-of-range offsets. Other
+      exceptions (programmer bugs in the caller, etc.) propagate. For
+      untrusted input, call `verify/1` first.
+      \"\"\"
+      @spec decode(binary()) :: {:ok, t()} | {:error, {:malformed_buffer, Exception.t()}}
       def decode(buf) when is_binary(buf) do
         try do
           {:ok, decode_at(buf, Wire.root_table_pos(buf))}
-        catch
-          kind, reason -> {:error, {kind, reason}}
+        rescue
+          e in [MatchError, ArgumentError, FunctionClauseError] ->
+            {:error, {:malformed_buffer, e}}
         end
       end
 
@@ -608,31 +615,27 @@ defmodule Flatbuf.Codegen.Table do
     """
   end
 
-  defp build_json_top(is_root?) do
-    if is_root? do
-      """
+  defp build_json_top() do
+    """
 
-        @doc \"Encode this table as a JSON string (flatc-compatible shape).\"
-        @spec to_json(t() | map()) :: binary()
-        def to_json(value) when is_map(value) do
-          value |> __to_json_map__() |> JSON.encode!() |> IO.iodata_to_binary()
-        end
+      @doc \"Encode this table as a JSON string (flatc-compatible shape).\"
+      @spec to_json(t() | map()) :: binary()
+      def to_json(value) when is_map(value) do
+        value |> __to_json_map__() |> JSON.encode!() |> IO.iodata_to_binary()
+      end
 
-        @doc \"Decode a JSON string into this table's struct.\"
-        @spec from_json(binary()) :: {:ok, t()} | {:error, term()}
-        def from_json(json) when is_binary(json) do
-          case JSON.decode(json) do
-            {:ok, map} -> {:ok, __from_json_map__(map)}
-            err -> err
-          end
+      @doc \"Decode a JSON string into this table's struct.\"
+      @spec from_json(binary()) :: {:ok, t()} | {:error, term()}
+      def from_json(json) when is_binary(json) do
+        case JSON.decode(json) do
+          {:ok, map} -> {:ok, __from_json_map__(map)}
+          err -> err
         end
-      """
-    else
-      ""
-    end
+      end
+    """
   end
 
-  defp build_verify_top(true, _file_id) do
+  defp build_verify_top() do
     """
 
       @doc \"\"\"
@@ -676,7 +679,7 @@ defmodule Flatbuf.Codegen.Table do
   # Niceties: opt-in behaviour and protocol derives
   # -----------------------------------------------------------------------
 
-  defp build_behaviour_decl(true, niceties) do
+  defp build_behaviour_decl(niceties) do
     if :behaviour in niceties do
       "\n  @behaviour Flatbuf.Table\n"
     else
@@ -687,7 +690,7 @@ defmodule Flatbuf.Codegen.Table do
   # Jason.Encoder is derived on the table struct itself, which fits the
   # decoded-shape (atoms + scalars + nested structs) cleanly. Users who
   # want flatc-shaped JSON instead use `to_json/1`.
-  defp build_derive_attrs(true, niceties) do
+  defp build_derive_attrs(niceties) do
     if :jason in niceties do
       "  @derive Jason.Encoder\n  "
     else
@@ -1221,7 +1224,7 @@ defmodule Flatbuf.Codegen.Table do
         "      :ok\n"
 
       _ ->
-        joined = clauses |> Enum.map(&String.trim/1) |> Enum.join(",\n         ")
+        joined = Enum.map_join(clauses, ",\n         ", &String.trim/1)
 
         """
               with #{joined} do
