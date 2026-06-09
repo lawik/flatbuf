@@ -60,7 +60,7 @@ defmodule Mix.Tasks.Flatbuf.Gen do
       wire_module: opts[:wire_module] || "Flatbuf.Generated.Wire",
       namespace: opts[:namespace],
       include: Keyword.get_values(opts, :include),
-      niceties: parse_niceties(opts[:niceties])
+      niceties: Flatbuf.Gen.parse_niceties(opts[:niceties])
     ]
 
     force? = Keyword.get(opts, :force, false)
@@ -94,13 +94,5 @@ defmodule Mix.Tasks.Flatbuf.Gen do
       {:error, {path, reason}} ->
         Mix.raise("flatbuf.gen: #{path}: #{inspect(reason)}")
     end
-  end
-
-  defp parse_niceties(nil), do: []
-
-  defp parse_niceties(str) when is_binary(str) do
-    str
-    |> String.split(",", trim: true)
-    |> Enum.map(&(&1 |> String.trim() |> String.to_atom()))
   end
 end

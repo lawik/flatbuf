@@ -30,18 +30,16 @@ defmodule Flatbuf.ReflectionSelfTest do
                      __DIR__
                    )
 
-  setup_all do
-    if File.exists?(@reflection_path) do
-      :ok
-    else
-      {:skip, "upstream corpus missing — run `mix flatbuf.fetch_fixtures`"}
-    end
-  end
-
+  # `setup_all` cannot skip a suite — returning `{:skip, _}` there
+  # makes ExUnit report 1 failure and 3 invalids. Instead, tag the
+  # module at compile time so the whole suite is genuinely skipped
+  # when the upstream corpus is missing.
   if File.exists?(@reflection_path) do
     {:ok, schema} = Flatbuf.Schema.Resolver.resolve_path(@reflection_path)
     artifacts = Flatbuf.Codegen.generate(schema, wire_module: Flatbuf.ReflectionSelfTest.Wire)
     CodegenCompiler.compile_artifacts!(artifacts)
+  else
+    @moduletag skip: "upstream corpus missing — run `mix flatbuf.fetch_fixtures`"
   end
 
   test "the resolved reflection.fbs has the expected top-level types" do

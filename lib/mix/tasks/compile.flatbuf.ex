@@ -73,10 +73,10 @@ defmodule Mix.Tasks.Compile.Flatbuf do
   end
 
   @impl Mix.Task.Compiler
-  def manifests, do: [manifest_path()]
+  def manifests(), do: [manifest_path()]
 
   @impl Mix.Task.Compiler
-  def clean do
+  def clean() do
     case File.read(manifest_path()) do
       {:ok, bin} ->
         case :erlang.binary_to_term(bin) do
@@ -166,7 +166,7 @@ defmodule Mix.Tasks.Compile.Flatbuf do
     end
   end
 
-  defp load_config do
+  defp load_config() do
     app = Mix.Project.config()[:app]
     flatbuf = Application.get_env(app, :flatbuf)
 
@@ -192,7 +192,7 @@ defmodule Mix.Tasks.Compile.Flatbuf do
     end
   end
 
-  defp manifest_path do
+  defp manifest_path() do
     Path.join([Mix.Project.manifest_path(), "compile.flatbuf"])
   end
 

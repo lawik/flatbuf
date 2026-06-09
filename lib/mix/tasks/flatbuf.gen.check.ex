@@ -42,7 +42,7 @@ defmodule Mix.Tasks.Flatbuf.Gen.Check do
       wire_module: opts[:wire_module] || "Flatbuf.Generated.Wire",
       namespace: opts[:namespace],
       include: Keyword.get_values(opts, :include),
-      niceties: parse_niceties(opts[:niceties])
+      niceties: Flatbuf.Gen.parse_niceties(opts[:niceties])
     ]
 
     case Gen.plan(paths, plan_opts) do
@@ -73,13 +73,5 @@ defmodule Mix.Tasks.Flatbuf.Gen.Check do
       File.read!(path) != source -> [{"differs  ", path}]
       true -> []
     end
-  end
-
-  defp parse_niceties(nil), do: []
-
-  defp parse_niceties(str) when is_binary(str) do
-    str
-    |> String.split(",", trim: true)
-    |> Enum.map(&(&1 |> String.trim() |> String.to_atom()))
   end
 end

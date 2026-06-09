@@ -335,9 +335,13 @@ defmodule Flatbuf.Schema.Resolver do
   defp struct_field_deps(_), do: []
 
   defp topo_sort(nodes, graph) do
+    # Plain maps (key => true) stand in for sets here. MapSet would
+    # express the intent better but dialyzer can't carry the opaque
+    # type through the mutual recursion below — using a map keeps
+    # the inference clean.
     {_, sorted} =
-      Enum.reduce(nodes, {MapSet.new(), []}, fn node, {seen, acc} ->
-        visit(node, graph, seen, acc, MapSet.new())
+      Enum.reduce(nodes, {%{}, []}, fn node, {seen, acc} ->
+        visit(node, graph, seen, acc, %{})
       end)
 
     Enum.reverse(sorted)
@@ -345,14 +349,14 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp visit(node, graph, seen, acc, stack) do
     cond do
-      MapSet.member?(stack, node) ->
+      Map.has_key?(stack, node) ->
         throw({:resolve_error, {:struct_cycle, node}})
 
-      MapSet.member?(seen, node) ->
+      Map.has_key?(seen, node) ->
         {seen, acc}
 
       true ->
-        stack = MapSet.put(stack, node)
+        stack = Map.put(stack, node, true)
         deps = Map.get(graph, node, [])
 
         {seen, acc} =
@@ -360,7 +364,7 @@ defmodule Flatbuf.Schema.Resolver do
             if Map.has_key?(graph, d), do: visit(d, graph, s, a, stack), else: {s, a}
           end)
 
-        {MapSet.put(seen, node), [node | acc]}
+        {Map.put(seen, node, true), [node | acc]}
     end
   end
 

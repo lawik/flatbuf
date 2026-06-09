@@ -68,6 +68,20 @@ defmodule Flatbuf.Gen do
   end
 
   @doc """
+  Parse a comma-separated nicety list (`"behaviour,jason"`) into a list
+  of atoms. `nil` returns `[]` so this can be used directly on
+  `OptionParser` output.
+  """
+  @spec parse_niceties(nil | String.t()) :: [atom()]
+  def parse_niceties(nil), do: []
+
+  def parse_niceties(str) when is_binary(str) do
+    str
+    |> String.split(",", trim: true)
+    |> Enum.map(&(&1 |> String.trim() |> String.to_atom()))
+  end
+
+  @doc """
   Translate a module atom to its on-disk path under `out_dir`, mirroring
   Elixir's standard `Macro.underscore`-per-segment layout.
   """
