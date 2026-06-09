@@ -34,6 +34,20 @@
 - `Flatbuf.Codegen.generate/2` accepts a `:niceties` option.
 - The generated `encode/1` now catches the required-field throw and
   returns it as a tagged error tuple instead of crashing the caller.
+- Generated sources are piped through `Code.format_string!/1` before
+  being returned/written, so emitted files pass
+  `mix format --check-formatted` as-is. Regenerating previously
+  committed output will produce a one-time formatting diff.
+- The generated `decode/1` no longer catches every exception. It
+  rescues only buffer-shaped failures (`MatchError`, `ArgumentError`,
+  `FunctionClauseError`) and returns
+  `{:error, {:malformed_buffer, exception}}`; other exceptions
+  propagate. Use `verify/1` first on untrusted input.
+
+### Fixed
+
+- Codegen crashed with a `CaseClauseError` on enum types declared
+  with no variants (e.g. `enum Foo : int {}`).
 
 ## v0.1.0
 
