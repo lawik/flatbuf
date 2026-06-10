@@ -23,6 +23,6 @@ erl_crash.dump
 flatbuf-*.tar
 
 # Upstream FlatBuffers test corpus, pulled by mix flatbuf.fetch_fixtures.
-# Pinned via FLATBUFFERS_TAG in lib/mix/tasks/flatbuf.fetch_fixtures.ex.
+# Pinned via the @tag in test/support/mix/tasks/flatbuf.fetch_fixtures.ex.
 /test/fixtures/upstream/
 

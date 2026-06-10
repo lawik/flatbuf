@@ -13,6 +13,10 @@ defmodule Flatbuf.MixProject do
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
+      # Tests compile generated modules into the running VM, including
+      # ones that `@derive Jason.Encoder`; consolidated protocols would
+      # never dispatch to those runtime-compiled impls.
+      consolidate_protocols: Mix.env() != :test,
       # Data files consumed by test support code that live under
       # test/fixtures/ but aren't themselves test modules.
       test_ignore_filters: [
@@ -100,8 +104,9 @@ defmodule Flatbuf.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:nstandard, "~> 0.3"},
+      {:nstandard, "~> 0.3", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.6", only: [:dev, :test]},
+      {:jason, "~> 1.4", only: [:dev, :test]},
       {:ex_doc, "~> 0.40", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
