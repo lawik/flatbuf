@@ -223,6 +223,12 @@ defmodule Flatbuf.Test.Flatc do
 
     * `:include_paths` — extra `-I` directories for schemas that
       `include` other files.
+    * `:raw_binary` (default `true`) — pass `--raw-binary`. Set to
+      `false` to make flatc enforce the schema's `file_identifier`.
+    * `:defaults_json` (default `true`) — pass `--defaults-json`. Set
+      to `false` to see only fields physically present on the wire.
+    * `:size_prefixed` (default `false`) — pass `--size-prefixed` for
+      buffers that carry a 4-byte length prefix.
   """
   def binary_to_json(schema_path, binary, opts \\ []) when is_binary(binary) do
     with {:ok, dir} <- tmp_dir(),
@@ -232,18 +238,9 @@ defmodule Flatbuf.Test.Flatc do
            System.cmd(
              ensure_available!(),
              include_args(opts) ++
-               [
-                 "--json",
-                 "--raw-binary",
-                 "--strict-json",
-                 "--defaults-json",
-                 "--no-warnings",
-                 "-o",
-                 dir,
-                 schema_path,
-                 "--",
-                 bin_path
-               ],
+               ["--json", "--strict-json", "--no-warnings"] ++
+               decode_flag_args(opts) ++
+               ["-o", dir, schema_path, "--", bin_path],
              stderr_to_stdout: true
            ) do
       # flatc always outputs JSON as `<basename>.json`, but we wrote
@@ -290,6 +287,8 @@ defmodule Flatbuf.Test.Flatc do
 
     * `:include_paths` — extra `-I` directories for schemas that
       `include` other files.
+    * `:size_prefixed` (default `false`) — pass `--size-prefixed` to
+      emit a buffer with a 4-byte length prefix.
   """
   def json_to_binary(schema_path, json, opts \\ []) when is_binary(json) do
     with {:ok, dir} <- tmp_dir(),
@@ -299,7 +298,9 @@ defmodule Flatbuf.Test.Flatc do
            System.cmd(
              ensure_available!(),
              include_args(opts) ++
-               ["--binary", "--no-warnings", "-o", dir, schema_path, json_path],
+               ["--binary", "--no-warnings"] ++
+               size_prefixed_args(opts) ++
+               ["-o", dir, schema_path, json_path],
              stderr_to_stdout: true
            ) do
       cond do
@@ -327,6 +328,18 @@ defmodule Flatbuf.Test.Flatc do
       [] -> []
       paths -> Enum.flat_map(paths, &["-I", &1])
     end
+  end
+
+  # Flag toggles for `binary_to_json/3` — defaults preserve the
+  # historical behavior (`--raw-binary --defaults-json`, no prefix).
+  defp decode_flag_args(opts) do
+    raw = if Keyword.get(opts, :raw_binary, true), do: ["--raw-binary"], else: []
+    dj = if Keyword.get(opts, :defaults_json, true), do: ["--defaults-json"], else: []
+    raw ++ dj ++ size_prefixed_args(opts)
+  end
+
+  defp size_prefixed_args(opts) do
+    if Keyword.get(opts, :size_prefixed, false), do: ["--size-prefixed"], else: []
   end
 
   defp tmp_dir do
