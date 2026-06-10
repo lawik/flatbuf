@@ -38,6 +38,9 @@ defmodule Flatbuf.Test.UpstreamFixtures do
       makes one from `:binary`).
     * `:size_prefixed?` — true if the binary has a 4-byte size prefix
       we have to strip / honor before decoding.
+    * `:known_issue` (optional) — one-line reason a fixture is pinned
+      as failing. Copied into the manifest as a comment so the pin is
+      self-explanatory.
   """
   def fixtures do
     monster_pairs = [
@@ -79,10 +82,15 @@ defmodule Flatbuf.Test.UpstreamFixtures do
         size_prefixed?: false
       },
       %{
+        # alignment_test.json is a stale orphan in upstream (referenced
+        # by nothing, written for an older schema revision whose
+        # SmallStructs had a `small_structs` field) — flatc itself
+        # rejects it. The checked-in binary from alignment_test.cpp is
+        # the real fixture: id 0 = even_structs under today's schema.
         name: "alignment_test",
         schema: "alignment_test.fbs",
-        binary: nil,
-        json: "alignment_test.json",
+        binary: "alignment_test_after_fix.bin",
+        json: nil,
         size_prefixed?: false
       },
       %{
@@ -104,7 +112,12 @@ defmodule Flatbuf.Test.UpstreamFixtures do
         schema: "evolution_test/evolution_v1.fbs",
         binary: nil,
         json: "evolution_test/evolution_v1.json",
-        size_prefixed?: false
+        size_prefixed?: false,
+        known_issue:
+          "flatc limitation: evolution_v1.json sets union `j` without `j_type`, " <>
+            "flatc encodes it as a NONE-typed value and its text generator then " <>
+            "crashes (SIGSEGV at v25.12.19), so no reference JSON can exist; " <>
+            "upstream never round-trips this buffer to text"
       },
       %{
         name: "evolution_v2",
@@ -118,7 +131,12 @@ defmodule Flatbuf.Test.UpstreamFixtures do
         schema: "64bit/test_64bit.fbs",
         binary: nil,
         json: "64bit/test_64bit.json",
-        size_prefixed?: false
+        size_prefixed?: false,
+        known_issue:
+          "library gap + flatc limitation: we don't implement the offset64/" <>
+            "vector64 wire format (UOffset64 in-table, u64 vector lengths), " <>
+            "and flatc's own text generator can't emit JSON for 64-bit " <>
+            "buffers (\"unknown type\"), so there is no oracle either"
       },
       %{
         name: "annotated_binary",
