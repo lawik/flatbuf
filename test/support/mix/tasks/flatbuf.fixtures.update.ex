@@ -56,6 +56,9 @@ defmodule Mix.Tasks.Flatbuf.Fixtures.Update do
     ok = Enum.count(results, fn {_, v} -> v == :ok end)
     fail = total - ok
 
+    notes =
+      for fx <- fixtures, note = Map.get(fx, :known_issue), into: %{}, do: {fx.name, note}
+
     body =
       """
       # Fixture round-trip manifest — outcomes for every binary/JSON
@@ -69,10 +72,12 @@ defmodule Mix.Tasks.Flatbuf.Fixtures.Update do
 
       %{
       """ <>
-        Enum.map_join(results, ",\n", fn {n, v} -> "  #{inspect(n)} => #{inspect(v)}" end) <>
+        Enum.map_join(results, ",\n", fn {n, v} ->
+          known_issue_comment(notes[n], v) <> "  #{inspect(n)} => #{inspect(v)}"
+        end) <>
         "\n}\n"
 
-    File.write!(helper.manifest_path(), body)
+    File.write!(helper.manifest_path(), format_source(body))
 
     Mix.shell().info("\nflatbuf.fixtures.update: #{ok} pass, #{fail} fail (of #{total})")
 
@@ -83,4 +88,38 @@ defmodule Mix.Tasks.Flatbuf.Fixtures.Update do
   defp outcome_tag({:error, kind, _}), do: "✗ #{kind}"
   defp outcome_tag({:error, kind}), do: "✗ #{kind}"
   defp outcome_tag(_), do: "?"
+
+  # Fixtures with a `:known_issue` get the reason written above their
+  # pinned entry, word-wrapped into comment lines, so the manifest
+  # explains itself. A note on a passing fixture is stale — drop it.
+  defp known_issue_comment(nil, _outcome), do: ""
+  defp known_issue_comment(_note, :ok), do: ""
+
+  defp known_issue_comment(note, _outcome) do
+    note
+    |> String.split(" ")
+    |> Enum.chunk_while(
+      {0, []},
+      fn word, {len, words} ->
+        if len + String.length(word) > 66 and words != [] do
+          {:cont, Enum.reverse(words), {String.length(word), [word]}}
+        else
+          {:cont, {len + String.length(word) + 1, [word | words]}}
+        end
+      end,
+      fn {_, words} -> {:cont, Enum.reverse(words), nil} end
+    )
+    |> Enum.map_join(fn words -> "  # " <> Enum.join(words, " ") <> "\n" end)
+  end
+
+  # The manifest lives under `test/`, which `mix format` checks — keep
+  # the generated file format-clean (comments survive formatting).
+  defp format_source(body) do
+    case Code.format_string!(body) do
+      [] -> body
+      formatted -> IO.iodata_to_binary([formatted, "\n"])
+    end
+  rescue
+    _ -> body
+  end
 end
