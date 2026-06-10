@@ -56,6 +56,7 @@ defmodule Flatbuf.Codegen.Table do
     always_emit_keys = always_emit_keys(t)
     required_check = build_required_check(t)
     file_id_funs = build_file_identifier_funs(schema.file_identifier)
+    file_ext_funs = build_file_extension_funs(schema.file_extension)
     behaviour_decl = build_behaviour_decl(niceties)
     derives = build_derive_attrs(niceties)
 
@@ -73,7 +74,7 @@ defmodule Flatbuf.Codegen.Table do
       @moduledoc "Generated from FlatBuffers table #{t.name}. Do not edit."
 
       alias #{inspect(wire_module)}, as: Wire
-    #{behaviour_decl}#{file_id_funs}
+    #{behaviour_decl}#{file_id_funs}#{file_ext_funs}
     #{derives}  defstruct #{defstruct_fields}
       @type t :: #{type_spec}
     #{encode_funs}#{json_top}
@@ -729,6 +730,26 @@ defmodule Flatbuf.Codegen.Table do
       \"\"\"
       @spec file_identifier() :: binary()
       def file_identifier, do: #{inspect(id)}
+    """
+  end
+
+  # Mirrors `file_identifier/0`: emitted only when the schema declares
+  # a `file_extension`, absent otherwise. Purely informational — the
+  # extension never appears on the wire; it's the conventional file
+  # suffix for buffers of this schema (flatc uses it to name `--binary`
+  # output, defaulting to ".bin").
+  defp build_file_extension_funs(nil), do: ""
+
+  defp build_file_extension_funs(ext) when is_binary(ext) do
+    """
+
+      @doc \"\"\"
+      The `file_extension` this schema declares: the conventional file
+      suffix (without the dot) for buffers rooted in this schema. It is
+      metadata only and never written into the buffer.
+      \"\"\"
+      @spec file_extension() :: binary()
+      def file_extension, do: #{inspect(ext)}
     """
   end
 
