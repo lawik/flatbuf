@@ -14,17 +14,16 @@ defmodule FlatbufTest do
 
   alias Mix.Tasks.Flatbuf.FetchFixtures
 
-  defp fixture(rel), do: Path.join(FetchFixtures.dest(), rel)
-
-  defp need_corpus!(path) do
-    unless File.exists?(path) do
-      flunk("upstream corpus missing — run `mix flatbuf.fetch_fixtures`")
-    end
+  # Skip the whole module (rather than flunk) when the upstream corpus
+  # hasn't been fetched, so a fresh clone's `mix test` stays green.
+  unless File.exists?(FetchFixtures.dest()) do
+    @moduletag skip: "upstream corpus missing — run `MIX_ENV=test mix flatbuf.fetch_fixtures`"
   end
+
+  defp fixture(rel), do: Path.join(FetchFixtures.dest(), rel)
 
   test "generate_from_path/1 works with no options" do
     path = fixture("tests/flatc/foo.fbs")
-    need_corpus!(path)
 
     {:ok, artifacts} = Flatbuf.generate_from_path(path)
     modules = Enum.map(artifacts, &elem(&1, 0))
@@ -34,7 +33,6 @@ defmodule FlatbufTest do
 
   test "generate_from_path/2 honors :wire_module" do
     path = fixture("tests/flatc/foo.fbs")
-    need_corpus!(path)
 
     {:ok, artifacts} = Flatbuf.generate_from_path(path, wire_module: MyTest.Wire)
     modules = Enum.map(artifacts, &elem(&1, 0))
@@ -54,7 +52,6 @@ defmodule FlatbufTest do
 
     for rel <- schemas do
       path = fixture(rel)
-      need_corpus!(path)
 
       {:ok, schema} = Flatbuf.Schema.Resolver.resolve_path(path)
 
@@ -72,7 +69,6 @@ defmodule FlatbufTest do
 
   test "Codegen.generate/2 emits the wire helper exactly once" do
     path = fixture("tests/arrays_test.fbs")
-    need_corpus!(path)
 
     {:ok, schema} = Flatbuf.Schema.Resolver.resolve_path(path)
     artifacts = Flatbuf.Codegen.generate(schema, wire_module: Flatbuf.SmokeTest.OnceWire)
@@ -94,7 +90,6 @@ defmodule FlatbufTest do
 
     for rel <- schemas do
       path = fixture(rel)
-      need_corpus!(path)
 
       {:ok, schema} = Flatbuf.Schema.Resolver.resolve_path(path)
 
@@ -117,7 +112,6 @@ defmodule FlatbufTest do
     # to crash `default_enum_value/2` with a `CaseClauseError`. We don't
     # care what value the field defaults to — only that codegen completes.
     path = fixture("tests/keyword_test.fbs")
-    need_corpus!(path)
 
     {:ok, artifacts} = Flatbuf.generate_from_path(path)
     assert length(artifacts) > 0
