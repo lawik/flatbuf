@@ -184,6 +184,7 @@ defmodule Flatbuf.Schema.Parser do
   end
 
   defp parse_field(tokens, docs) do
+    line = head_line(tokens)
     {name, rest} = expect_ident(tokens, "field name")
     rest2 = expect_punct(rest, :colon)
     {type_ref, rest3} = parse_type_ref(rest2)
@@ -196,7 +197,8 @@ defmodule Flatbuf.Schema.Parser do
        type: type_ref,
        default: default,
        attributes: attrs,
-       docs: docs
+       docs: docs,
+       line: line
      }, rest6}
   end
 
@@ -448,17 +450,17 @@ defmodule Flatbuf.Schema.Parser do
   #   TypeName
   #   alias_name : TypeName
   #   "string"  (the scalar — variant name defaults to "string")
-  defp parse_union_variant([{:ident, alias_name, _}, {:punct, :colon, _} | rest], docs) do
+  defp parse_union_variant([{:ident, alias_name, line}, {:punct, :colon, _} | rest], docs) do
     {type, rest2} = parse_type_ref(rest)
     {var_attrs, rest3} = maybe_parse_attribute_list(rest2)
-    {%{name: alias_name, type: type, docs: docs, attributes: var_attrs}, rest3}
+    {%{name: alias_name, type: type, docs: docs, attributes: var_attrs, line: line}, rest3}
   end
 
-  defp parse_union_variant([{:ident, name, _} | rest], docs) do
+  defp parse_union_variant([{:ident, name, line} | rest], docs) do
     case Map.fetch(@scalar_types, name) do
       {:ok, :string} ->
         {var_attrs, rest2} = maybe_parse_attribute_list(rest)
-        {%{name: "string", type: :string, docs: docs, attributes: var_attrs}, rest2}
+        {%{name: "string", type: :string, docs: docs, attributes: var_attrs, line: line}, rest2}
 
       {:ok, _other} ->
         throw({:parse_error, {:bad_union_variant, name}})
@@ -477,7 +479,14 @@ defmodule Flatbuf.Schema.Parser do
         # types ending in `Monster` don't collide. Plain references
         # keep their name as-is.
         variant_name = String.replace(full, ".", "_")
-        {%{name: variant_name, type: {:name, full}, docs: docs, attributes: var_attrs}, rest3}
+
+        {%{
+           name: variant_name,
+           type: {:name, full},
+           docs: docs,
+           attributes: var_attrs,
+           line: line
+         }, rest3}
     end
   end
 
@@ -526,6 +535,7 @@ defmodule Flatbuf.Schema.Parser do
     do: parse_enum_variants(rest, docs ++ [body], acc)
 
   defp parse_enum_variants(tokens, docs, acc) do
+    line = head_line(tokens)
     {name, rest} = expect_ident(tokens, "enum variant name")
 
     {value, rest2} =
@@ -544,7 +554,7 @@ defmodule Flatbuf.Schema.Parser do
 
     {var_attrs, rest2} = maybe_parse_attribute_list(rest2)
 
-    variant = %{name: name, value: value, docs: docs, attributes: var_attrs}
+    variant = %{name: name, value: value, docs: docs, attributes: var_attrs, line: line}
 
     case rest2 do
       [{:punct, :comma, _} | r] ->
