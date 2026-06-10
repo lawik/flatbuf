@@ -1,0 +1,25 @@
+// Encode-oracle fixture: every scalar width with in-range boundary
+// values, plus explicit non-zero defaults we deliberately leave unset
+// (they must be omitted from the wire; flatc --defaults-json surfaces
+// them, plain --json must not).
+
+namespace EncOracle.Scalars;
+
+table Everything {
+  i8_min: byte;
+  u8_max: ubyte;
+  i16_min: short;
+  u16_max: ushort;
+  i32_min: int;
+  u32_max: uint;
+  i64_min: long;
+  u64_max: ulong;
+  f32_max: float;
+  f32_pi: float;
+  f64_e: double;
+  flag: bool;
+  answer: int = 42;
+  on: bool = true;
+}
+
+root_type Everything;

@@ -1,0 +1,14 @@
+// Encode-oracle fixture: file_identifier emission and size-prefixed
+// encoding. flatc invoked without --raw-binary refuses buffers whose
+// identifier doesn't match, so it acts as the acceptance gate.
+
+namespace EncOracle.Ident;
+
+table Msg {
+  body: string;
+  n: int;
+}
+
+root_type Msg;
+
+file_identifier "ENOR";

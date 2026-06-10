@@ -1,0 +1,23 @@
+// Encode-oracle fixture: tables nested several levels deep, with the
+// same subobject value referenced from two places.
+
+namespace EncOracle.Nesting;
+
+table Leaf {
+  tag: string;
+  n: int;
+}
+
+table Mid {
+  left: Leaf;
+  right: Leaf;
+  depth: int;
+}
+
+table Top {
+  title: string;
+  mid: Mid;
+  direct: Leaf;
+}
+
+root_type Top;

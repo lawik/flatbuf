@@ -1,0 +1,19 @@
+// Encode-oracle fixture: vectors of scalars across every width
+// (including byte vectors and bool vectors), plus a present-but-empty
+// vector.
+
+namespace EncOracle.Vectors;
+
+table Nums {
+  bytes: [ubyte];
+  signed_bytes: [byte];
+  shorts: [short];
+  uints: [uint];
+  longs: [long];
+  floats: [float];
+  doubles: [double];
+  bools: [bool];
+  empty: [int];
+}
+
+root_type Nums;

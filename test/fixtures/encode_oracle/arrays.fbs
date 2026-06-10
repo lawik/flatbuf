@@ -1,0 +1,23 @@
+// Encode-oracle fixture: fixed-size arrays in structs — scalar arrays
+// of two widths and an array of structs, with a trailing odd-size
+// field so padding has to be right.
+
+namespace EncOracle.Arrays;
+
+struct Inner {
+  a: int;
+  b: int;
+}
+
+struct ArrStruct {
+  xs: [int:3];
+  ys: [ushort:4];
+  inners: [Inner:2];
+  tail: ubyte;
+}
+
+table Holder {
+  s: ArrStruct;
+}
+
+root_type Holder;

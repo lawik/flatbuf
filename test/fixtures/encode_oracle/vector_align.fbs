@@ -1,0 +1,13 @@
+// Encode-oracle fixture: force_align on vector fields. The odd-size
+// `pad` field perturbs natural alignment so the encoder actually has
+// to pad. flatc must read the element values back intact.
+
+namespace EncOracle.VecAlign;
+
+table Doc {
+  pad: ubyte;
+  forced: [long] (force_align: 16);
+  bytes: [ubyte] (force_align: 8);
+}
+
+root_type Doc;
