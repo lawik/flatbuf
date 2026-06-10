@@ -365,6 +365,21 @@ defmodule Flatbuf.Codegen.Wire do
     end
 
     @doc """
+    Check that an inline field at table-relative voffset `off` spanning
+    `len` bytes fits inside the table's inline area. The vtable's
+    per-slot voffsets are attacker-controlled, so every present inline
+    slot must pass this before the reader dereferences it.
+    `verify_table_header/2` has already bounded `table_pos +
+    inline_size` against the buffer, so passing this check also bounds
+    the field against the buffer end.
+    """
+    def verify_inline_field(inline_size, off, len) do
+      if off + len <= inline_size,
+        do: :ok,
+        else: {:error, {:inline_field_out_of_bounds, off, len, inline_size}}
+    end
+
+    @doc """
     Verify a table header at `table_pos`. Returns
     `{:ok, vt_size, inline_size}` so the caller can iterate slots.
     """
