@@ -360,26 +360,24 @@ defmodule Flatbuf.EncodeOracleTest do
         assert_we_read_flatc("union_vector", union_vector_expected(), EncOracle.UnionVec.Holder)
       end
 
-      # KNOWN ENCODE BUG (REVIEW C5): a nil (NONE) element in a vector
-      # of unions crashes encode/1 with ArithmeticError in
-      # Wire.create_offset_vector/2 — unskip when fixed.
-      @tag :skip
       test "NONE elements in a vector of unions" do
         input = %{label: "with-none", things: [{:Sword, %{dmg: 1}}, nil, {:Words, "hi"}]}
         assert {:ok, bin} = EncOracle.UnionVec.Holder.encode(input)
+        assert :ok = EncOracle.UnionVec.Holder.verify(bin)
+        assert {:ok, decoded} = EncOracle.UnionVec.Holder.decode(bin)
+        assert [{:Sword, %{dmg: 1}}, nil, {:Words, "hi"}] = decoded.things
 
-        assert {:ok, json} = Flatc.binary_to_json(schema_path("union_vector"), bin)
-        assert json["things_type"] == ["Sword", "NONE", "Words"]
+        # flatc's binary layer accepts NONE elements (disc 0, offset 0 —
+        # `flatc --annotate` labels the slot "offset to union ('NONE')"),
+        # but its JSON text generator rejects them with "unknown enum
+        # value", so the oracle comparison stops at the binary layer.
+        assert {:error, {:flatc_no_json, _}} =
+                 Flatc.binary_to_json(schema_path("union_vector"), bin)
       end
 
-      # KNOWN CODEGEN BUG: a table whose only depth-recursing field is
-      # a vector of unions emits a __verify_at__/3 whose head binds
-      # `_depth` (recurses_field?/1, lib/flatbuf/codegen/table.ex:1204,
-      # has no {:vector, {:union, _}} clause) while the union-vector
-      # verify body references `depth - 1` (table.ex:1294) — the
-      # generated module does not compile. union_vector.fbs carries a
-      # `bonus: Sword` field purely to dodge this. Unskip when fixed.
-      @tag :skip
+      # Regression: a table whose only depth-recursing field is a vector
+      # of unions used to emit a __verify_at__/3 head binding `_depth`
+      # while the body referenced `depth - 1` — a compile error.
       test "table whose only recursing field is a union vector compiles" do
         source = """
         namespace EncOracleRT.UnionVecOnly;

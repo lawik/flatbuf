@@ -17,7 +17,6 @@ defmodule Flatbuf.ScalarValidationTest do
   namespace ScalarV;
 
   enum Color: ubyte { Red, Green, Blue }
-  enum Wide: ubyte { Small = 1, Huge = 300 }
 
   struct Pt {
     x: int;
@@ -33,15 +32,12 @@ defmodule Flatbuf.ScalarValidationTest do
     d: double;
     flag: bool;
     color: Color;
-    wide: Wide;
     nums: [ushort];
     bools: [bool];
     colors: [Color];
     pt: Pt;
     id: uint (hash: "fnv1a_32");
   }
-
-  table WideVec { ws: [Wide]; }
 
   root_type T;
   """
@@ -115,19 +111,19 @@ defmodule Flatbuf.ScalarValidationTest do
   end
 
   describe "enum underlying values" do
-    test "a variant whose declared value overflows the underlying type is rejected" do
-      # The resolver accepts `Huge = 300` on a ubyte enum; the encoder
-      # is the last line of defense before the wire.
-      assert {:error, {:scalar_out_of_range, :wide, :u8, 300}} = ScalarV.T.encode(%{wide: :Huge})
-    end
-
-    test "enum vectors validate each element's underlying value" do
-      assert {:error, {:scalar_out_of_range, :ws, :u8, 300}} =
-               ScalarV.WideVec.encode(%{ws: [:Small, :Huge]})
+    test "a variant whose declared value overflows the underlying type never reaches the encoder" do
+      # The resolver rejects the declaration outright, so the encoder's
+      # check_scalar! on enum underlying values is pure defense-in-depth.
+      assert {:error, {:enum_value_out_of_range, _, "Huge", 300, _}} =
+               Flatbuf.Schema.Resolver.resolve_source("""
+               enum Wide: ubyte { Small = 1, Huge = 300 }
+               table T { w: Wide; }
+               root_type T;
+               """)
     end
 
     test "valid enum values still encode" do
-      assert {:ok, bin} = ScalarV.T.encode(%{color: :Blue, wide: :Small, colors: [:Green]})
+      assert {:ok, bin} = ScalarV.T.encode(%{color: :Blue, colors: [:Green]})
       assert {:ok, decoded} = ScalarV.T.decode(bin)
       assert decoded.color == :Blue
       assert decoded.colors == [:Green]
