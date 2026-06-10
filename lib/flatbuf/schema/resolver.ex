@@ -202,22 +202,22 @@ defmodule Flatbuf.Schema.Resolver do
     fqn = qualify(body.name, state.namespace)
     check_duplicate_names(body.variants, &{:duplicate_union_variant, fqn, &1, &2})
 
-    # Discriminator 0 is NONE, so a u8 leaves room for 255 variants.
-    if length(body.variants) > 255 do
+    underlying = union_underlying(body, fqn, state)
+
+    # Discriminator 0 is NONE, so the default u8 leaves room for 255
+    # variants. With an explicit underlying type the per-value range
+    # check in compute_union_values is the governing rule, as in flatc.
+    if body.underlying_type == nil and length(body.variants) > 255 do
       throw({:resolve_error, {:too_many_union_variants, fqn, length(body.variants)}})
     end
 
-    variants =
-      body.variants
-      |> Enum.with_index(1)
-      |> Enum.map(fn {v, disc} ->
-        {String.to_atom(v.name), v.type, disc}
-      end)
+    variants = compute_union_values(body.variants, fqn, underlying)
 
     union = %Union{
       name: fqn,
       namespace: state.namespace,
       short_name: body.name,
+      underlying_type: underlying,
       variants: variants,
       attributes: normalize_attrs(body.attributes),
       docs: body.docs
@@ -252,6 +252,62 @@ defmodule Flatbuf.Schema.Resolver do
     }
 
     %{state | schema: put_type(state.schema, fqn, enum)}
+  end
+
+  @integral_scalars [:i8, :u8, :i16, :u16, :i32, :u32, :i64, :u64]
+
+  # flatc: "underlying uniontype must be integral". Integral scalars
+  # pass through; a named ref must be an *already declared* enum —
+  # flatc resolves this single-pass, so forward references are
+  # rejected too — and the union inherits the enum's own width.
+  defp union_underlying(%{underlying_type: nil}, _fqn, _state), do: :u8
+
+  defp union_underlying(%{underlying_type: {:scalar, s}}, _fqn, _state)
+       when s in @integral_scalars,
+       do: s
+
+  defp union_underlying(%{underlying_type: {:name, name}} = body, fqn, state) do
+    found =
+      name
+      |> enumerate_candidates(state.namespace)
+      |> Enum.find_value(fn cand -> Map.get(state.schema.types, cand) end)
+
+    case found do
+      %SchemaEnum{underlying_type: u} ->
+        u
+
+      _ ->
+        throw({:resolve_error, {:union_underlying_not_integral, fqn, name, body.line}})
+    end
+  end
+
+  defp union_underlying(%{underlying_type: other} = body, fqn, _state),
+    do: throw({:resolve_error, {:union_underlying_not_integral, fqn, other, body.line}})
+
+  # Union discriminator values: 0 is reserved for NONE; explicit `= N`
+  # values are honored and implicit ones increment from the previous
+  # (starting at 1). Every value must fit the underlying type. flatc
+  # accepts duplicate values between variants (the first declaration
+  # wins on decode) but rejects a collision with NONE at 0.
+  defp compute_union_values(variants, fqn, underlying) do
+    {lo, hi} = scalar_int_range(underlying)
+
+    {result, _next} =
+      Enum.map_reduce(variants, 1, fn v, expected ->
+        disc = v.value || expected
+
+        if disc < lo or disc > hi do
+          throw({:resolve_error, {:union_value_out_of_range, fqn, v.name, disc, v.line}})
+        end
+
+        if disc == 0 do
+          throw({:resolve_error, {:union_value_collides_with_none, fqn, v.name, v.line}})
+        end
+
+        {{String.to_atom(v.name), v.type, disc}, disc + 1}
+      end)
+
+    result
   end
 
   defp build_field(f) do

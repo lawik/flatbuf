@@ -410,7 +410,8 @@ defmodule Flatbuf.Schema.Parser do
 
   defp parse_union(tokens, line, docs) do
     {name, rest} = expect_ident(tokens, "union name")
-    {attrs, rest2} = maybe_parse_attribute_list(rest)
+    {underlying, rest1} = maybe_parse_union_underlying(rest)
+    {attrs, rest2} = maybe_parse_attribute_list(rest1)
     rest3 = expect_punct(rest2, :lbrace)
     {variants, rest4} = parse_union_variants(rest3, [], [])
     rest5 = expect_punct(rest4, :rbrace)
@@ -418,12 +419,20 @@ defmodule Flatbuf.Schema.Parser do
     {{:union,
       %{
         name: name,
+        underlying_type: underlying,
         variants: variants,
         attributes: attrs,
         docs: docs,
         line: line
       }}, rest5}
   end
+
+  # `union Name : T { … }` — T sets the discriminator's underlying type
+  # (flatc: must be integral, or a previously declared integral enum).
+  # The parser records whatever type ref the author wrote; the resolver
+  # enforces integrality, mirroring flatc's error placement.
+  defp maybe_parse_union_underlying([{:punct, :colon, _} | rest]), do: parse_type_ref(rest)
+  defp maybe_parse_union_underlying(rest), do: {nil, rest}
 
   defp parse_union_variants([{:punct, :rbrace, _} | _] = rest, _docs, acc),
     do: {Enum.reverse(acc), rest}
@@ -450,17 +459,33 @@ defmodule Flatbuf.Schema.Parser do
   #   TypeName
   #   alias_name : TypeName
   #   "string"  (the scalar — variant name defaults to "string")
+  #
+  # Each may carry an explicit discriminator value (`A = 555`), which
+  # flatc accepts on any union and which matters once an underlying
+  # type widens the value range past u8.
   defp parse_union_variant([{:ident, alias_name, line}, {:punct, :colon, _} | rest], docs) do
     {type, rest2} = parse_type_ref(rest)
-    {var_attrs, rest3} = maybe_parse_attribute_list(rest2)
-    {%{name: alias_name, type: type, docs: docs, attributes: var_attrs, line: line}, rest3}
+    {value, rest3} = maybe_parse_union_variant_value(rest2)
+    {var_attrs, rest4} = maybe_parse_attribute_list(rest3)
+
+    {%{name: alias_name, type: type, value: value, docs: docs, attributes: var_attrs, line: line},
+     rest4}
   end
 
   defp parse_union_variant([{:ident, name, line} | rest], docs) do
     case Map.fetch(@scalar_types, name) do
       {:ok, :string} ->
-        {var_attrs, rest2} = maybe_parse_attribute_list(rest)
-        {%{name: "string", type: :string, docs: docs, attributes: var_attrs, line: line}, rest2}
+        {value, rest2} = maybe_parse_union_variant_value(rest)
+        {var_attrs, rest3} = maybe_parse_attribute_list(rest2)
+
+        {%{
+           name: "string",
+           type: :string,
+           value: value,
+           docs: docs,
+           attributes: var_attrs,
+           line: line
+         }, rest3}
 
       {:ok, _other} ->
         throw({:parse_error, {:bad_union_variant, name}})
@@ -472,7 +497,8 @@ defmodule Flatbuf.Schema.Parser do
             _ -> {name, rest}
           end
 
-        {var_attrs, rest3} = maybe_parse_attribute_list(rest2)
+        {value, rest3} = maybe_parse_union_variant_value(rest2)
+        {var_attrs, rest4} = maybe_parse_attribute_list(rest3)
 
         # flatc's convention for the auto-generated variant name on a
         # dotted reference is dots → underscores, so two qualified
@@ -483,15 +509,25 @@ defmodule Flatbuf.Schema.Parser do
         {%{
            name: variant_name,
            type: {:name, full},
+           value: value,
            docs: docs,
            attributes: var_attrs,
            line: line
-         }, rest3}
+         }, rest4}
     end
   end
 
   defp parse_union_variant([tok | _], _docs),
     do: throw({:parse_error, {:expected_union_variant, tok}})
+
+  defp maybe_parse_union_variant_value([{:punct, :eq, _} | rest]) do
+    case parse_literal(rest) do
+      {{:int, n}, rest2} -> {n, rest2}
+      {other, _} -> throw({:parse_error, {:bad_union_value, other}})
+    end
+  end
+
+  defp maybe_parse_union_variant_value(rest), do: {nil, rest}
 
   # Enum ------------------------------------------------------------------
 
