@@ -1,6 +1,6 @@
 defmodule Flatbuf.ReflectionSelfTest do
   @moduledoc """
-  SPEC §9 Phase 3: "Reflection-fbs emission, self-test via reflection."
+  Reflection self-test: round-trip the upstream `reflection.fbs`.
 
   The upstream `reflection.fbs` schema describes a parsed FlatBuffers
   schema — it can represent itself. This test runs our pipeline end

@@ -46,7 +46,7 @@ defmodule Flatbuf.MixProject do
   def docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md", "SPEC.md"],
+      extras: ["README.md", "CHANGELOG.md"],
       source_url: "https://github.com/lawik/flatbuf"
     ]
   end
@@ -56,7 +56,7 @@ defmodule Flatbuf.MixProject do
       name: :flatbuf,
       licenses: ["Apache-2.0"],
       maintainers: ["Lars Wikman"],
-      files: ~w(lib mix.exs README.md CHANGELOG.md SPEC.md LICENSE.md),
+      files: ~w(lib mix.exs README.md CHANGELOG.md LICENSE.md),
       links: %{
         "GitHub" => "https://github.com/lawik/flatbuf",
         "Changelog" => "https://github.com/lawik/flatbuf/blob/main/CHANGELOG.md"

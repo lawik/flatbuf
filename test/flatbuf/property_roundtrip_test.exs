@@ -1,6 +1,6 @@
 defmodule Flatbuf.PropertyRoundtripTest do
   @moduledoc """
-  Property-based round-trip tests (SPEC §10.4): StreamData generators
+  Property-based round-trip tests: StreamData generators
   driven by the schema IR produce arbitrary valid values, which are
   then pushed through every direction we can check.
 

@@ -2,8 +2,8 @@ defmodule Flatbuf.OracleTest do
   @moduledoc """
   Differential tests against `flatc`, the upstream reference compiler.
 
-  These tests are the practical answer to SPEC.md §10.2: "the library is
-  correct iff `flatc` says it is." They take a schema we can fully
+  The working assumption is that the library is correct iff `flatc`
+  says it is. These tests take a schema we can fully
   generate code for, encode a value via our codegen, and ask `flatc` to
   decode it back to JSON — failing if the round-trip diverges.
 

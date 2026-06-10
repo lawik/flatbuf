@@ -1,6 +1,7 @@
 // Encode-oracle fixture: vector of unions with mixed variants
 // (two table variants and a string variant). NONE/nil elements are
-// deliberately not exercised here — see REVIEW C5 (encode crash).
+// covered by a dedicated test in encode_oracle_test.exs (flatc's JSON
+// layer can't express them, so that test stops at the binary layer).
 
 namespace EncOracle.UnionVec;
 

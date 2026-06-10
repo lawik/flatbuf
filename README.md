@@ -5,8 +5,8 @@ plain `.ex` files — generate, commit, drop the dep.
 
 > Status: alpha. Decodes the upstream `flatc` test corpus and the
 > encoders are differentially tested against `flatc` across the
-> feature matrix; design and spec coverage live in
-> [`SPEC.md`](SPEC.md), known gaps in [Limitations](#limitations).
+> feature matrix; see [Limitations](#limitations) for what's out of
+> scope and what's not done yet.
 
 ## Install
 
@@ -56,16 +56,42 @@ flatbuf.gen.check` is the CI gate. `mix help flatbuf.gen` has the flags.
 
 ## Limitations
 
-- 64-bit offsets / `(vector64)` — parsed but encoded as 32-bit.
+By design:
+
+- No runtime schema interpretation. All schema knowledge is compiled
+  into the emitted modules; there is no generic walk-a-buffer-with-a-
+  schema decoder.
+- No in-place mutation API. Elixir binaries don't mutate; a
+  "rebuild with this field changed" helper would only fake the
+  semantics, so we don't ship the pretense.
+- No FlexBuffers (a separate, schema-less format — out of scope).
+- `rpc_service` — parsed and surfaced as data, no client/server
+  codegen or transport.
+- The verifier does not alignment-check offsets. Misaligned reads are
+  safe on the BEAM, and nothing this library emits is misaligned —
+  but a buffer we accept could in principle be rejected by a stricter
+  C++ verifier. Verifier errors are `{:error, reason, path}`;
+  recursion depth is bounded (`max_depth:` option, default 64).
+- `mix flatbuf.gen` is manifest-free: it writes what you ask for, and
+  renames leave old files behind. Use the `:flatbuf` Mix compiler if
+  you want stale-output cleanup.
 - `force_align` on tables — ignored (as `flatc` does); honored on
   structs and vectors.
+- Encoding ignores unknown keys in input maps; missing keys take the
+  schema defaults.
+
+Not done yet:
+
+- 64-bit offsets / `(vector64)` — parsed but encoded as 32-bit.
 - Union underlying types (`union U : int32 { ... }`) — supported with
   full-width discriminators (what `flatc`'s generated code does), but
   `flatc`'s own JSON tooling doesn't implement the feature, so no
   text-level interop for such schemas.
-- `rpc_service` — parsed, no client/server codegen.
 - `to_json/1` f32 strings — same bits as flatc, longer decimals.
 - FNV-64 hashes follow the spec but aren't differentially tested against flatc.
+- Property tests and the `flatc` differential suites need the test
+  corpus and a `flatc` binary; a fresh clone runs the offline subset
+  and prints how to fetch them.
 
 ## License
 

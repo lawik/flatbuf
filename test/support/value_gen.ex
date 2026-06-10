@@ -1,7 +1,7 @@
 defmodule Flatbuf.Test.ValueGen do
   @moduledoc """
   IR-driven StreamData generators and the matching "expected decode"
-  normalizer for property-based round-trip tests (SPEC §10.4).
+  normalizer for property-based round-trip tests.
 
   `root_gen/3` takes a resolved `%Flatbuf.Schema{}` plus a root-table
   FQN and returns a generator of value maps that are *valid inputs* for

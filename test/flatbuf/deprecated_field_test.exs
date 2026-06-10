@@ -1,7 +1,7 @@
 defmodule Flatbuf.DeprecatedFieldTest do
   @moduledoc """
   Pins `(deprecated)` field semantics across the whole generated
-  surface (SPEC: "skip in encode, accept in decode").
+  surface: skipped in encode, accepted in decode.
 
   Reference semantics, probed against flatc 25.12.19:
 

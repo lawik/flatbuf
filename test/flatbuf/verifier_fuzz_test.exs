@@ -1,6 +1,6 @@
 defmodule Flatbuf.VerifierFuzzTest do
   @moduledoc """
-  SPEC §10.6: verifier fuzz corpus.
+  Verifier fuzz corpus.
 
   Generates a battery of malformed buffers from a known-good seed and
   asserts that the generated `verify/2` returns `:ok` or `{:error, _, _}`

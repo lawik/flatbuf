@@ -13,7 +13,7 @@
   text-level interop with `flatc` is not possible for these schemas.
 - Property-based round-trip tests (StreamData): generators derived
   from the schema IR produce arbitrary valid values and round-trip
-  them through encode/decode/verify and through `flatc` (SPEC §10.4).
+  them through encode/decode/verify and through `flatc`.
 - Generated root tables expose `file_extension/0` when the schema
   declares `file_extension`, parallel to `file_identifier/0`.
 - `verify/2` and `verify_size_prefixed/2` accept `max_depth:`

@@ -855,8 +855,8 @@ defmodule Flatbuf.Codegen.Table do
   end
 
   defp build_encode_build(t, schema, ns) do
-    # `(deprecated)` fields are skipped on the encode side (SPEC:
-    # "skip in encode, accept in decode"), matching flatc's generated
+    # `(deprecated)` fields are skipped on the encode side and still
+    # accepted on the decode side, matching flatc's generated
     # builders, which emit no setter for them. The remaining fields
     # keep their id-derived vtable slots, so the deprecated slot stays
     # reserved on the wire — it's simply never written.

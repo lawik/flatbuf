@@ -27,3 +27,9 @@ flatbuf-*.tar
 # No trailing slash: also matches a symlink to a corpus elsewhere.
 /test/fixtures/upstream
 
+# Working notes / review scratch docs — fine to have locally, never tracked.
+/SPEC.md
+/REVIEW.md
+/QUALITY.md
+/PROBLEMS.md
+
