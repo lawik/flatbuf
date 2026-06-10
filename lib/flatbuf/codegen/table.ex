@@ -18,41 +18,32 @@ defmodule Flatbuf.Codegen.Table do
   alias Flatbuf.Schema.Table
   alias Flatbuf.Schema.Union, as: SchemaUnion
 
-  @ns_key :flatbuf_codegen_table_namespace
-
   @spec generate(Table.t(), Schema.t(), keyword()) :: {module(), String.t()}
   def generate(%Table{} = t, %Schema{} = schema, opts) do
-    Process.put(@ns_key, Keyword.get(opts, :namespace))
-
-    try do
-      do_generate(t, schema, opts)
-    after
-      Process.delete(@ns_key)
-    end
-  end
-
-  defp do_generate(%Table{} = t, %Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
+    # The `:namespace` override is threaded explicitly (trailing `ns`
+    # arg) through every helper that maps FQNs to module names.
+    ns = Keyword.get(opts, :namespace)
     # Every table can serve as the root of a (possibly nested) buffer,
     # so we always emit `decode/1`, `encode/1`, `verify/2`,
     # `to_json/1`, and `from_json/1`. The schema's `root_type`
     # declaration is a hint about the canonical root; it doesn't
     # restrict which tables can act as roots.
-    module_name = fqn_to_module(t.name)
+    module_name = fqn_to_module(t.name, ns)
     module_atom = Module.concat([module_name])
 
     niceties = Keyword.get(opts, :niceties, [])
 
     defstruct_fields = build_defstruct(t, schema)
-    type_spec = build_type_spec(t, schema)
+    type_spec = build_type_spec(t, schema, ns)
     decode_at_body = build_decode_at(t, schema)
-    accessor_funs = build_accessors(t, schema)
-    build_body = build_encode_build(t, schema)
+    accessor_funs = build_accessors(t, schema, ns)
+    build_body = build_encode_build(t, schema, ns)
     encode_funs = build_encode_top(schema.file_identifier)
-    to_json_map_body = build_to_json_map(t, schema)
-    from_json_map_body = build_from_json_map(t, schema)
+    to_json_map_body = build_to_json_map(t, schema, ns)
+    from_json_map_body = build_from_json_map(t, schema, ns)
     json_top = build_json_top()
-    verify_body = build_verify_at(t, schema)
+    verify_body = build_verify_at(t, schema, ns)
     verify_top = build_verify_top()
     always_emit_keys = always_emit_keys(t)
     required_check = build_required_check(t)
@@ -137,24 +128,24 @@ defmodule Flatbuf.Codegen.Table do
     "[" <> Enum.join(parts, ", ") <> "]"
   end
 
-  defp build_type_spec(t, schema) do
+  defp build_type_spec(t, schema, ns) do
     parts =
       Enum.map(t.fields, fn f ->
-        "#{f.name}: #{type_for(f.type, schema)}"
+        "#{f.name}: #{type_for(f.type, schema, ns)}"
       end)
 
     "%__MODULE__{" <> Enum.join(parts, ", ") <> "}"
   end
 
-  defp type_for({:scalar, :bool}, _), do: "boolean()"
-  defp type_for({:scalar, k}, _) when k in [:f32, :f64], do: "float() | nil"
-  defp type_for({:scalar, _}, _), do: "integer() | nil"
-  defp type_for(:string, _), do: "String.t() | nil"
-  defp type_for({:vector, inner}, schema), do: "[#{type_for(inner, schema)}]"
-  defp type_for({:enum, fqn}, _), do: fqn_to_module(fqn) <> ".t() | nil"
-  defp type_for({:struct, fqn}, _), do: fqn_to_module(fqn) <> ".t() | nil"
-  defp type_for({:table, fqn}, _), do: fqn_to_module(fqn) <> ".t() | nil"
-  defp type_for({:union, fqn}, _), do: fqn_to_module(fqn) <> ".t()"
+  defp type_for({:scalar, :bool}, _, _ns), do: "boolean()"
+  defp type_for({:scalar, k}, _, _ns) when k in [:f32, :f64], do: "float() | nil"
+  defp type_for({:scalar, _}, _, _ns), do: "integer() | nil"
+  defp type_for(:string, _, _ns), do: "String.t() | nil"
+  defp type_for({:vector, inner}, schema, ns), do: "[#{type_for(inner, schema, ns)}]"
+  defp type_for({:enum, fqn}, _, ns), do: fqn_to_module(fqn, ns) <> ".t() | nil"
+  defp type_for({:struct, fqn}, _, ns), do: fqn_to_module(fqn, ns) <> ".t() | nil"
+  defp type_for({:table, fqn}, _, ns), do: fqn_to_module(fqn, ns) <> ".t() | nil"
+  defp type_for({:union, fqn}, _, ns), do: fqn_to_module(fqn, ns) <> ".t()"
 
   # -----------------------------------------------------------------------
   # Defaults
@@ -270,12 +261,12 @@ defmodule Flatbuf.Codegen.Table do
     |> trim_trailing_comma()
   end
 
-  defp build_accessors(t, schema) do
+  defp build_accessors(t, schema, ns) do
     per_field =
       Enum.map_join(t.fields, "\n", fn f ->
-        field_decoder(f, schema) <>
-          nested_flatbuffer_accessor(f, schema, t) <>
-          keyed_lookup_accessor(f, schema)
+        field_decoder(f, schema, ns) <>
+          nested_flatbuffer_accessor(f, schema, t, ns) <>
+          keyed_lookup_accessor(f, schema, ns)
       end)
 
     per_field <> key_introspection(t)
@@ -307,16 +298,16 @@ defmodule Flatbuf.Codegen.Table do
   # `find_<field>_by_<key>(buf, table_pos, target)` helper that binary
   # -searches the (sorted-by-key) vector and returns the matching
   # table's `decode_at/2` result, or `nil`.
-  defp keyed_lookup_accessor(f, schema) do
+  defp keyed_lookup_accessor(f, schema, ns) do
     with {:vector, {:table, fqn}} <- f.type,
          %Table{} = inner <- Schema.fetch(schema, fqn),
          key_field when not is_nil(key_field) <-
            Enum.find(inner.fields, fn kf -> Map.get(kf.attributes, :key, false) end) do
-      mod = fqn_to_module(fqn)
+      mod = fqn_to_module(fqn, ns)
 
       """
 
-        @doc \"Binary-search `#{f.name}` for the entry with `#{key_field.name} == target`. Returns the matching #{fqn_to_module(fqn)} struct or `nil`.\"
+        @doc \"Binary-search `#{f.name}` for the entry with `#{key_field.name} == target`. Returns the matching #{mod} struct or `nil`.\"
         def find_#{f.name}_by_#{key_field.name}(buf, pos, target) do
           case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
             0 ->
@@ -343,11 +334,11 @@ defmodule Flatbuf.Codegen.Table do
   # vector as a contiguous binary slice and decodes it as the named
   # type. Returns `{:ok, struct} | {:error, reason}` or `nil` if the
   # field is absent.
-  defp nested_flatbuffer_accessor(f, schema, t) do
+  defp nested_flatbuffer_accessor(f, schema, t, ns) do
     with {:vector, {:scalar, :u8}} <- f.type,
          name when is_binary(name) <- Map.get(f.attributes, :nested_flatbuffer),
          fqn when is_binary(fqn) <- resolve_nested_type(name, t.namespace, schema) do
-      mod = fqn_to_module(fqn)
+      mod = fqn_to_module(fqn, ns)
       short = fqn |> String.split(".") |> List.last() |> Macro.underscore()
 
       """
@@ -393,8 +384,8 @@ defmodule Flatbuf.Codegen.Table do
     end
   end
 
-  defp field_decoder(f, schema) do
-    body = field_decode_body(f, schema)
+  defp field_decoder(f, schema, ns) do
+    body = field_decode_body(f, schema, ns)
 
     """
       @doc \"Read field `#{f.name}` from a table at position `pos`. Returns the field value or its default.\"
@@ -403,7 +394,7 @@ defmodule Flatbuf.Codegen.Table do
     """
   end
 
-  defp field_decode_body(f, schema) do
+  defp field_decode_body(f, schema, ns) do
     case f.type do
       {:union, fqn} ->
         # Union fields use two adjacent vtable slots: discriminator
@@ -424,7 +415,7 @@ defmodule Flatbuf.Codegen.Table do
                     value_o ->
                       disc = Wire.read_#{u}(buf, pos + type_o)
                       abs_pos = Wire.follow_uoffset(buf, pos + value_o)
-                      #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                      #{fqn_to_module(fqn, ns)}.decode_variant(buf, disc, abs_pos)
                   end
               end
         """
@@ -463,7 +454,7 @@ defmodule Flatbuf.Codegen.Table do
                             disc ->
                               elem_pos = Wire.vector_elem_pos(values_abs, i, 4)
                               abs_pos = Wire.follow_uoffset(buf, elem_pos)
-                              #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                              #{fqn_to_module(fqn, ns)}.decode_variant(buf, disc, abs_pos)
                           end
                         end
                       end
@@ -486,24 +477,24 @@ defmodule Flatbuf.Codegen.Table do
               "Wire.read_string_at(buf, Wire.follow_uoffset(buf, pos + o))"
 
             {:vector, inner} ->
-              decode_vector_expr(inner, schema)
+              decode_vector_expr(inner, schema, ns)
 
             {:enum, fqn} ->
               %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
-              "#{fqn_to_module(fqn)}.from_value(Wire.read_#{u}(buf, pos + o))"
+              "#{fqn_to_module(fqn, ns)}.from_value(Wire.read_#{u}(buf, pos + o))"
 
             {:struct, fqn} ->
-              "#{fqn_to_module(fqn)}.decode_at(buf, pos + o)"
+              "#{fqn_to_module(fqn, ns)}.decode_at(buf, pos + o)"
 
             {:table, fqn} ->
-              "#{fqn_to_module(fqn)}.decode_at(buf, Wire.follow_uoffset(buf, pos + o))"
+              "#{fqn_to_module(fqn, ns)}.decode_at(buf, Wire.follow_uoffset(buf, pos + o))"
           end
 
         "      case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do\n        0 -> #{default_lit}\n        o -> #{read_expr}\n      end\n"
     end
   end
 
-  defp decode_vector_expr(inner, schema) do
+  defp decode_vector_expr(inner, schema, ns) do
     {elem_size, _elem_align, read_elem} =
       case inner do
         {:scalar, kind} ->
@@ -519,15 +510,17 @@ defmodule Flatbuf.Codegen.Table do
           sz = Schema.scalar_size(u)
 
           {sz, sz,
-           "#{fqn_to_module(fqn)}.from_value(Wire.read_#{u}(buf, Wire.vector_elem_pos(abs, i, #{sz})))"}
+           "#{fqn_to_module(fqn, ns)}.from_value(Wire.read_#{u}(buf, Wire.vector_elem_pos(abs, i, #{sz})))"}
 
         {:struct, fqn} ->
           %SchemaStruct{size: sz, align: al} = Schema.fetch(schema, fqn)
-          {sz, al, "#{fqn_to_module(fqn)}.decode_at(buf, Wire.vector_elem_pos(abs, i, #{sz}))"}
+
+          {sz, al,
+           "#{fqn_to_module(fqn, ns)}.decode_at(buf, Wire.vector_elem_pos(abs, i, #{sz}))"}
 
         {:table, fqn} ->
           {4, 4,
-           "#{fqn_to_module(fqn)}.decode_at(buf, Wire.follow_uoffset(buf, Wire.vector_elem_pos(abs, i, 4)))"}
+           "#{fqn_to_module(fqn, ns)}.decode_at(buf, Wire.follow_uoffset(buf, Wire.vector_elem_pos(abs, i, 4)))"}
 
         {:union, _fqn} ->
           # Vectors of unions are Phase 3 — they use two parallel
@@ -861,15 +854,15 @@ defmodule Flatbuf.Codegen.Table do
     Enum.reject(fields, &Map.get(&1.attributes, :deprecated, false))
   end
 
-  defp build_encode_build(t, schema) do
+  defp build_encode_build(t, schema, ns) do
     # `(deprecated)` fields are skipped on the encode side (SPEC:
     # "skip in encode, accept in decode"), matching flatc's generated
     # builders, which emit no setter for them. The remaining fields
     # keep their id-derived vtable slots, so the deprecated slot stays
     # reserved on the wire — it's simply never written.
     live = %{t | fields: reject_deprecated(t.fields)}
-    {prelude_lines, addrs_per_field} = build_subobject_prelude(live, schema)
-    field_add_lines = build_field_adds(live, schema, addrs_per_field)
+    {prelude_lines, addrs_per_field} = build_subobject_prelude(live, schema, ns)
+    field_add_lines = build_field_adds(live, schema, addrs_per_field, ns)
 
     """
         b = builder
@@ -880,10 +873,10 @@ defmodule Flatbuf.Codegen.Table do
 
   # For each field that references a sub-object (string/vector/sub-table),
   # emit code that builds it and stores its addr into a local variable.
-  defp build_subobject_prelude(t, schema) do
+  defp build_subobject_prelude(t, schema, ns) do
     {lines, addrs} =
       Enum.map_reduce(t.fields, %{}, fn f, acc ->
-        case build_subobject_for_field(f, schema) do
+        case build_subobject_for_field(f, schema, ns) do
           nil ->
             {"", acc}
 
@@ -895,7 +888,7 @@ defmodule Flatbuf.Codegen.Table do
     {Enum.join(lines), addrs}
   end
 
-  defp build_subobject_for_field(f, schema) do
+  defp build_subobject_for_field(f, schema, ns) do
     var = "addr_#{f.name}"
     field_lookup = "Map.get(value, #{inspect(f.name)})"
 
@@ -924,7 +917,7 @@ defmodule Flatbuf.Codegen.Table do
       {:vector, {:union, fqn}} ->
         # Two locals: the type vector's addr and the value vector's.
         types_var = "addr_#{f.name}_types"
-        mod = fqn_to_module(fqn)
+        mod = fqn_to_module(fqn, ns)
         {u, sz} = union_disc_info(fqn, schema)
 
         line = """
@@ -958,7 +951,7 @@ defmodule Flatbuf.Codegen.Table do
         {{:union_vec, types_var, var}, line}
 
       {:vector, inner} ->
-        line = build_vector_prelude(f, var, field_lookup, inner, schema)
+        line = build_vector_prelude(f, var, field_lookup, inner, schema, ns)
         {var, line}
 
       {:table, fqn} ->
@@ -966,7 +959,7 @@ defmodule Flatbuf.Codegen.Table do
             {b, #{var}} =
               case #{field_lookup} do
                 nil -> {b, nil}
-                v -> #{fqn_to_module(fqn)}.build(b, v)
+                v -> #{fqn_to_module(fqn, ns)}.build(b, v)
               end
         """
 
@@ -983,8 +976,8 @@ defmodule Flatbuf.Codegen.Table do
                   {b, 0, nil}
 
                 {variant_atom, variant_value} ->
-                  {b2, addr} = #{fqn_to_module(fqn)}.build_variant(b, variant_atom, variant_value)
-                  {b2, #{fqn_to_module(fqn)}.discriminator(variant_atom), addr}
+                  {b2, addr} = #{fqn_to_module(fqn, ns)}.build_variant(b, variant_atom, variant_value)
+                  {b2, #{fqn_to_module(fqn, ns)}.discriminator(variant_atom), addr}
               end
         """
 
@@ -1004,7 +997,7 @@ defmodule Flatbuf.Codegen.Table do
 
   defp force_align(_), do: 1
 
-  defp build_vector_prelude(f, var, field_lookup, inner, schema) do
+  defp build_vector_prelude(f, var, field_lookup, inner, schema, ns) do
     # `(force_align: N)` on the vector field raises the element
     # alignment to at least N, so the contiguous vector body starts
     # at an N-aligned offset.
@@ -1070,7 +1063,7 @@ defmodule Flatbuf.Codegen.Table do
 
                   {addrs, b} =
                     Enum.map_reduce(list, b, fn item, acc ->
-                      {acc2, a} = #{fqn_to_module(fqn)}.build(acc, item)
+                      {acc2, a} = #{fqn_to_module(fqn, ns)}.build(acc, item)
                       {a, acc2}
                     end)
 
@@ -1082,7 +1075,7 @@ defmodule Flatbuf.Codegen.Table do
         %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
         sz = Schema.scalar_size(u)
         elem_align = max(sz, force)
-        mod = fqn_to_module(fqn)
+        mod = fqn_to_module(fqn, ns)
         check_kind = if u == :bool, do: :u8, else: u
 
         """
@@ -1102,7 +1095,7 @@ defmodule Flatbuf.Codegen.Table do
       {:struct, fqn} ->
         %SchemaStruct{size: sz, align: al} = Schema.fetch(schema, fqn)
         elem_align = max(al, force)
-        mod = fqn_to_module(fqn)
+        mod = fqn_to_module(fqn, ns)
 
         """
             {b, #{var}} =
@@ -1135,13 +1128,13 @@ defmodule Flatbuf.Codegen.Table do
     end
   end
 
-  defp build_field_adds(t, schema, addrs) do
+  defp build_field_adds(t, schema, addrs, ns) do
     t.fields
     |> Enum.reverse()
-    |> Enum.map_join("", fn f -> build_field_add(f, schema, addrs) end)
+    |> Enum.map_join("", fn f -> build_field_add(f, schema, addrs, ns) end)
   end
 
-  defp build_field_add(f, schema, addrs) do
+  defp build_field_add(f, schema, addrs, ns) do
     slot = f.vtable_slot
 
     case f.type do
@@ -1218,7 +1211,7 @@ defmodule Flatbuf.Codegen.Table do
         %SchemaEnum{underlying_type: u} = enum_rec = Schema.fetch(schema, fqn)
         optional? = f.default == :null
         default = default_value(f, schema)
-        mod = fqn_to_module(fqn)
+        mod = fqn_to_module(fqn, ns)
 
         push_fn =
           if u == :bool, do: "&Wire.push_u8/2", else: "&Wire.push_#{u}/2"
@@ -1257,7 +1250,7 @@ defmodule Flatbuf.Codegen.Table do
 
       {:struct, fqn} ->
         %SchemaStruct{align: al} = Schema.fetch(schema, fqn)
-        mod = fqn_to_module(fqn)
+        mod = fqn_to_module(fqn, ns)
 
         """
             b =
@@ -1324,7 +1317,7 @@ defmodule Flatbuf.Codegen.Table do
   defp recurses_field?({:vector, {:union, _}}), do: true
   defp recurses_field?(_), do: false
 
-  defp build_verify_at(t, schema) do
+  defp build_verify_at(t, schema, ns) do
     # Deprecated fields keep their per-field content clause: our
     # decoder still reads them when present, so the verifier must
     # cover everything decode dereferences. Only the *required*
@@ -1334,7 +1327,7 @@ defmodule Flatbuf.Codegen.Table do
     # verifier likewise skips the check for deprecated fields.
     field_clauses =
       t.fields
-      |> Enum.map(fn f -> verify_field(f, schema) end)
+      |> Enum.map(fn f -> verify_field(f, schema, ns) end)
       |> Enum.reject(&(&1 == ""))
 
     required_clauses =
@@ -1373,7 +1366,7 @@ defmodule Flatbuf.Codegen.Table do
   # table's inline area via `Wire.verify_inline_field/3` — scalars and
   # inline structs in full, offset-typed fields for their 4-byte
   # uoffset — before anything dereferences it.
-  defp verify_field(f, schema) do
+  defp verify_field(f, schema, ns) do
     case f.type do
       {:scalar, kind} ->
         verify_inline_only_field(f, Schema.scalar_size(kind))
@@ -1401,13 +1394,13 @@ defmodule Flatbuf.Codegen.Table do
         """
 
       {:vector, {:union, fqn}} ->
-        verify_union_vector_field(f, fqn, schema)
+        verify_union_vector_field(f, fqn, schema, ns)
 
       {:vector, inner} ->
-        verify_vector_field(f, inner, schema)
+        verify_vector_field(f, inner, schema, ns)
 
       {:table, fqn} ->
-        mod = fqn_to_module(fqn)
+        mod = fqn_to_module(fqn, ns)
 
         """
         :ok <- Wire.verify_path(
@@ -1423,7 +1416,7 @@ defmodule Flatbuf.Codegen.Table do
         """
 
       {:union, fqn} ->
-        mod = fqn_to_module(fqn)
+        mod = fqn_to_module(fqn, ns)
         disc_slot = f.vtable_slot - 2
         {u, sz} = union_disc_info(fqn, schema)
 
@@ -1464,8 +1457,8 @@ defmodule Flatbuf.Codegen.Table do
   # flatc's generated Verify<Union>Vector: both-or-neither present,
   # equal element counts, and NONE (discriminator 0) elements verified
   # by skipping their value slot entirely.
-  defp verify_union_vector_field(f, fqn, schema) do
-    mod = fqn_to_module(fqn)
+  defp verify_union_vector_field(f, fqn, schema, ns) do
+    mod = fqn_to_module(fqn, ns)
     disc_slot = f.vtable_slot - 2
     {u, sz} = union_disc_info(fqn, schema)
 
@@ -1511,8 +1504,8 @@ defmodule Flatbuf.Codegen.Table do
     """
   end
 
-  defp verify_vector_field(f, inner, schema) do
-    {elem_size, elem_verifier} = vector_elem_verify(inner, schema)
+  defp verify_vector_field(f, inner, schema, ns) do
+    {elem_size, elem_verifier} = vector_elem_verify(inner, schema, ns)
 
     """
     :ok <- Wire.verify_path(
@@ -1537,33 +1530,33 @@ defmodule Flatbuf.Codegen.Table do
 
   # Returns {elem_size, verify_expr} where verify_expr uses `elem_pos`,
   # `buf`, and `depth` and produces :ok or {:error, _}.
-  defp vector_elem_verify({:scalar, kind}, _),
+  defp vector_elem_verify({:scalar, kind}, _, _ns),
     do:
       {Schema.scalar_size(kind), "Wire.verify_bounds(buf, elem_pos, #{Schema.scalar_size(kind)})"}
 
-  defp vector_elem_verify(:string, _),
+  defp vector_elem_verify(:string, _, _ns),
     do:
       {4,
        "(case Wire.verify_follow_uoffset(buf, elem_pos) do {:ok, sp} -> Wire.verify_string_at(buf, sp); e -> e end)"}
 
-  defp vector_elem_verify({:enum, fqn}, schema) do
+  defp vector_elem_verify({:enum, fqn}, schema, _ns) do
     %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
     sz = Schema.scalar_size(u)
     {sz, "Wire.verify_bounds(buf, elem_pos, #{sz})"}
   end
 
-  defp vector_elem_verify({:struct, fqn}, schema) do
+  defp vector_elem_verify({:struct, fqn}, schema, _ns) do
     %SchemaStruct{size: sz} = Schema.fetch(schema, fqn)
     {sz, "Wire.verify_bounds(buf, elem_pos, #{sz})"}
   end
 
-  defp vector_elem_verify({:table, fqn}, _),
+  defp vector_elem_verify({:table, fqn}, _, ns),
     do:
       {4,
-       "(case Wire.verify_follow_uoffset(buf, elem_pos) do {:ok, tp} -> #{fqn_to_module(fqn)}.__verify_at__(buf, tp, depth - 1); e -> e end)"}
+       "(case Wire.verify_follow_uoffset(buf, elem_pos) do {:ok, tp} -> #{fqn_to_module(fqn, ns)}.__verify_at__(buf, tp, depth - 1); e -> e end)"}
 
-  defp vector_elem_verify({:union, _fqn}, _) do
-    # Vectors of unions are handled specially in verify_field/2 above
+  defp vector_elem_verify({:union, _fqn}, _, _ns) do
+    # Vectors of unions are handled specially in verify_field/3 above
     # (they take two parallel vtable slots). This clause shouldn't be
     # reached, but kept for safety.
     {4, "Wire.verify_bounds(buf, elem_pos, 4)"}
@@ -1573,7 +1566,7 @@ defmodule Flatbuf.Codegen.Table do
   # JSON map builders
   # -----------------------------------------------------------------------
 
-  defp build_to_json_map(t, schema) do
+  defp build_to_json_map(t, schema, ns) do
     t.fields
     # `(deprecated)` fields are intentionally dropped from JSON
     # output: to_json reflects what encode/1 would write, and flatc's
@@ -1589,7 +1582,7 @@ defmodule Flatbuf.Codegen.Table do
 
       case f.type do
         {:union, fqn} ->
-          mod = fqn_to_module(fqn)
+          mod = fqn_to_module(fqn, ns)
           type_key = inspect(Atom.to_string(f.name) <> "_type")
 
           """
@@ -1598,7 +1591,7 @@ defmodule Flatbuf.Codegen.Table do
           """
 
         {:vector, {:union, fqn}} ->
-          mod = fqn_to_module(fqn)
+          mod = fqn_to_module(fqn, ns)
           type_key = inspect(Atom.to_string(f.name) <> "_type")
 
           """
@@ -1613,25 +1606,25 @@ defmodule Flatbuf.Codegen.Table do
           # empty-list values get filtered out at the end of
           # `__to_json_map__`, which mirrors flatc omitting fields
           # genuinely absent from the vtable.
-          expr = to_json_value_expr(f.type, val, schema)
+          expr = to_json_value_expr(f.type, val, schema, ns)
           "      {#{key}, #{expr}},\n"
       end
     end)
   end
 
-  defp build_from_json_map(t, schema) do
+  defp build_from_json_map(t, schema, ns) do
     Enum.map_join(t.fields, "", fn f ->
       key = inspect(Atom.to_string(f.name))
 
       case f.type do
         {:union, fqn} ->
-          mod = fqn_to_module(fqn)
+          mod = fqn_to_module(fqn, ns)
           type_key = inspect(Atom.to_string(f.name) <> "_type")
 
           "      #{f.name}: #{mod}.__from_json__(Map.get(map, #{type_key}), Map.get(map, #{key})),\n"
 
         {:vector, {:union, fqn}} ->
-          mod = fqn_to_module(fqn)
+          mod = fqn_to_module(fqn, ns)
           type_key = inspect(Atom.to_string(f.name) <> "_type")
 
           """
@@ -1645,7 +1638,7 @@ defmodule Flatbuf.Codegen.Table do
 
         _ ->
           val = "Map.get(map, #{key})"
-          expr = from_json_value_expr(f.type, val, schema)
+          expr = from_json_value_expr(f.type, val, schema, ns)
           # `(hash: "fnv1_32")` accepts a JSON string at the input side
           # and hashes it. JSON values that are already integers pass
           # through `Wire.maybe_hash/2` unchanged.
@@ -1663,52 +1656,52 @@ defmodule Flatbuf.Codegen.Table do
     end)
   end
 
-  defp to_json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
+  defp to_json_value_expr({:scalar, k}, val, _, _ns) when k in [:f32, :f64] do
     "(case #{val} do :nan -> \"nan\"; :infinity -> \"inf\"; :neg_infinity -> \"-inf\"; v -> v end)"
   end
 
-  defp to_json_value_expr({:scalar, _}, val, _), do: val
-  defp to_json_value_expr(:string, val, _), do: val
+  defp to_json_value_expr({:scalar, _}, val, _, _ns), do: val
+  defp to_json_value_expr(:string, val, _, _ns), do: val
 
-  defp to_json_value_expr({:enum, fqn}, val, _),
-    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__to_json__(#{val}))"
+  defp to_json_value_expr({:enum, fqn}, val, _, ns),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn, ns)}.__to_json__(#{val}))"
 
-  defp to_json_value_expr({:struct, fqn}, val, _),
-    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__to_json_map__(#{val}))"
+  defp to_json_value_expr({:struct, fqn}, val, _, ns),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn, ns)}.__to_json_map__(#{val}))"
 
-  defp to_json_value_expr({:table, fqn}, val, _),
-    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__to_json_map__(#{val}))"
+  defp to_json_value_expr({:table, fqn}, val, _, ns),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn, ns)}.__to_json_map__(#{val}))"
 
-  defp to_json_value_expr({:vector, inner}, val, schema) do
-    inner_expr = to_json_value_expr(inner, "v", schema)
+  defp to_json_value_expr({:vector, inner}, val, schema, ns) do
+    inner_expr = to_json_value_expr(inner, "v", schema, ns)
     "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
   end
 
   # Phase 3 stub — vectors of unions emit nothing.
-  defp to_json_value_expr({:union, _}, _val, _schema), do: "nil"
+  defp to_json_value_expr({:union, _}, _val, _schema, _ns), do: "nil"
 
-  defp from_json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
+  defp from_json_value_expr({:scalar, k}, val, _, _ns) when k in [:f32, :f64] do
     "(case #{val} do \"nan\" -> :nan; \"inf\" -> :infinity; \"-inf\" -> :neg_infinity; v -> v end)"
   end
 
-  defp from_json_value_expr({:scalar, _}, val, _), do: val
-  defp from_json_value_expr(:string, val, _), do: val
+  defp from_json_value_expr({:scalar, _}, val, _, _ns), do: val
+  defp from_json_value_expr(:string, val, _, _ns), do: val
 
-  defp from_json_value_expr({:enum, fqn}, val, _),
-    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__from_json__(#{val}))"
+  defp from_json_value_expr({:enum, fqn}, val, _, ns),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn, ns)}.__from_json__(#{val}))"
 
-  defp from_json_value_expr({:struct, fqn}, val, _),
-    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__from_json_map__(#{val}))"
+  defp from_json_value_expr({:struct, fqn}, val, _, ns),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn, ns)}.__from_json_map__(#{val}))"
 
-  defp from_json_value_expr({:table, fqn}, val, _),
-    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn)}.__from_json_map__(#{val}))"
+  defp from_json_value_expr({:table, fqn}, val, _, ns),
+    do: "if(#{val} == nil, do: nil, else: #{fqn_to_module(fqn, ns)}.__from_json_map__(#{val}))"
 
-  defp from_json_value_expr({:vector, inner}, val, schema) do
-    inner_expr = from_json_value_expr(inner, "v", schema)
+  defp from_json_value_expr({:vector, inner}, val, schema, ns) do
+    inner_expr = from_json_value_expr(inner, "v", schema, ns)
     "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
   end
 
-  defp from_json_value_expr({:union, _}, _val, _schema), do: "nil"
+  defp from_json_value_expr({:union, _}, _val, _schema, _ns), do: "nil"
 
   # -----------------------------------------------------------------------
   # Misc
@@ -1718,5 +1711,5 @@ defmodule Flatbuf.Codegen.Table do
     String.replace(s, ~r/,\n$/, "\n")
   end
 
-  defp fqn_to_module(fqn), do: Naming.module_name(fqn, Process.get(@ns_key))
+  defp fqn_to_module(fqn, ns), do: Naming.module_name(fqn, ns)
 end

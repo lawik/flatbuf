@@ -12,36 +12,22 @@ defmodule Flatbuf.Codegen.Struct do
   alias Flatbuf.Schema.Enum, as: SchemaEnum
   alias Flatbuf.Schema.Struct, as: SchemaStruct
 
-  # Process-dict key for the namespace override. The override is set
-  # at the top of `generate/3` and cleared in the `after` block, so it
-  # only lives for the duration of one type's source emission. Using
-  # the dict keeps the defp helpers below from needing an extra
-  # parameter on every callsite.
-  @ns_key :flatbuf_codegen_struct_namespace
-
   @spec generate(SchemaStruct.t(), Schema.t(), keyword()) :: {module(), String.t()}
   def generate(%SchemaStruct{} = s, %Schema{} = schema, opts) do
-    Process.put(@ns_key, Keyword.get(opts, :namespace))
-
-    try do
-      do_generate(s, schema, opts)
-    after
-      Process.delete(@ns_key)
-    end
-  end
-
-  defp do_generate(%SchemaStruct{} = s, %Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
-    module_name = fqn_to_module(s.name)
+    # The `:namespace` override is threaded explicitly (trailing `ns`
+    # arg) through every helper that maps FQNs to module names.
+    ns = Keyword.get(opts, :namespace)
+    module_name = fqn_to_module(s.name, ns)
     module_atom = Module.concat([module_name])
 
     defstruct_fields = build_defstruct(s)
-    type_spec = build_type_spec(s, schema)
-    decode_body = build_decode(s, schema, wire_module)
-    encode_body = build_encode(s, schema)
-    array_helpers = build_array_helpers(s, schema)
-    to_json_body = build_to_json_map(s, schema)
-    from_json_body = build_from_json_map(s, schema)
+    type_spec = build_type_spec(s, schema, ns)
+    decode_body = build_decode(s, schema, ns)
+    encode_body = build_encode(s, schema, ns)
+    array_helpers = build_array_helpers(s, schema, ns)
+    to_json_body = build_to_json_map(s, schema, ns)
+    from_json_body = build_from_json_map(s, schema, ns)
 
     source = """
     defmodule #{module_name} do
@@ -102,57 +88,57 @@ defmodule Flatbuf.Codegen.Struct do
   defp default_for({:array, _, _}), do: []
   defp default_for(_), do: nil
 
-  defp build_type_spec(s, schema) do
+  defp build_type_spec(s, schema, ns) do
     parts =
       Enum.map(s.fields, fn f ->
-        "#{f.name}: #{type_for(f.type, schema)}"
+        "#{f.name}: #{type_for(f.type, schema, ns)}"
       end)
 
     "%__MODULE__{" <> Enum.join(parts, ", ") <> "}"
   end
 
-  defp type_for({:scalar, :bool}, _), do: "boolean()"
-  defp type_for({:scalar, k}, _) when k in [:f32, :f64], do: "float()"
-  defp type_for({:scalar, _}, _), do: "integer()"
+  defp type_for({:scalar, :bool}, _, _ns), do: "boolean()"
+  defp type_for({:scalar, k}, _, _ns) when k in [:f32, :f64], do: "float()"
+  defp type_for({:scalar, _}, _, _ns), do: "integer()"
 
-  defp type_for({:enum, fqn}, _) do
-    fqn_to_module(fqn) <> ".t()"
+  defp type_for({:enum, fqn}, _, ns) do
+    fqn_to_module(fqn, ns) <> ".t()"
   end
 
-  defp type_for({:struct, fqn}, _) do
-    fqn_to_module(fqn) <> ".t()"
+  defp type_for({:struct, fqn}, _, ns) do
+    fqn_to_module(fqn, ns) <> ".t()"
   end
 
-  defp type_for({:array, inner, _n}, schema) do
-    "[#{type_for(inner, schema)}]"
+  defp type_for({:array, inner, _n}, schema, ns) do
+    "[#{type_for(inner, schema, ns)}]"
   end
 
-  defp type_for(_, _), do: "any()"
+  defp type_for(_, _, _ns), do: "any()"
 
-  defp build_decode(s, schema, _wire_module) do
+  defp build_decode(s, schema, ns) do
     s.layout
     |> Enum.map_join("", fn entry ->
       f = entry.field
-      read_expr = decode_at_expr(f.type, "pos + #{entry.offset}", schema)
+      read_expr = decode_at_expr(f.type, "pos + #{entry.offset}", schema, ns)
       "      #{f.name}: #{read_expr},\n"
     end)
     |> trim_trailing_comma()
   end
 
-  defp decode_at_expr({:scalar, kind}, pos_expr, _schema),
+  defp decode_at_expr({:scalar, kind}, pos_expr, _schema, _ns),
     do: "Wire.read_#{kind}(buf, #{pos_expr})"
 
-  defp decode_at_expr({:enum, fqn}, pos_expr, schema) do
+  defp decode_at_expr({:enum, fqn}, pos_expr, schema, ns) do
     %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
-    "#{fqn_to_module(fqn)}.from_value(Wire.read_#{u}(buf, #{pos_expr}))"
+    "#{fqn_to_module(fqn, ns)}.from_value(Wire.read_#{u}(buf, #{pos_expr}))"
   end
 
-  defp decode_at_expr({:struct, fqn}, pos_expr, _schema),
-    do: "#{fqn_to_module(fqn)}.decode_at(buf, #{pos_expr})"
+  defp decode_at_expr({:struct, fqn}, pos_expr, _schema, ns),
+    do: "#{fqn_to_module(fqn, ns)}.decode_at(buf, #{pos_expr})"
 
-  defp decode_at_expr({:array, inner, n}, pos_expr, schema) do
+  defp decode_at_expr({:array, inner, n}, pos_expr, schema, ns) do
     {elem_size, _} = scalar_or_struct_size_align(inner, schema)
-    inner_decoder = decode_at_expr(inner, "(#{pos_expr}) + i * #{elem_size}", schema)
+    inner_decoder = decode_at_expr(inner, "(#{pos_expr}) + i * #{elem_size}", schema, ns)
     "(for i <- 0..#{n - 1}, do: #{inner_decoder})"
   end
 
@@ -175,7 +161,7 @@ defmodule Flatbuf.Codegen.Struct do
     {sz * n, al}
   end
 
-  defp build_encode(s, schema) do
+  defp build_encode(s, schema, ns) do
     # Build the binary in source-declared order using pure binary syntax.
     # Padding is emitted as a `0::size(N)` bit-spec — not a nested
     # binary literal, which Elixir parses as a `>>` operator soup.
@@ -184,7 +170,7 @@ defmodule Flatbuf.Codegen.Struct do
         f = entry.field
         pad = entry.offset - inferred_pos(s.layout, entry)
         pad_part = if pad > 0, do: "0::size(#{pad * 8})", else: ""
-        value_part = encode_field_part(f, schema)
+        value_part = encode_field_part(f, schema, ns)
 
         case pad_part do
           "" -> value_part
@@ -224,7 +210,7 @@ defmodule Flatbuf.Codegen.Struct do
   # silently, and a struct encoder built from `<<v::little-16>>` parts
   # would otherwise corrupt data without a word. The throw is caught by
   # the enclosing table's generated `encode/1`.
-  defp encode_field_part(f, schema) do
+  defp encode_field_part(f, schema, ns) do
     val = "Map.get(value, #{inspect(f.name)}, #{inspect(default_for(f.type))})"
 
     case f.type do
@@ -237,10 +223,10 @@ defmodule Flatbuf.Codegen.Struct do
       {:enum, fqn} ->
         %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
         spec = scalar_bin_spec(u)
-        "(#{checked("#{fqn_to_module(fqn)}.value(#{val})", check_kind(u), f.name)})::#{spec}"
+        "(#{checked("#{fqn_to_module(fqn, ns)}.value(#{val})", check_kind(u), f.name)})::#{spec}"
 
       {:struct, fqn} ->
-        "(#{fqn_to_module(fqn)}.encode(#{val}))::binary"
+        "(#{fqn_to_module(fqn, ns)}.encode(#{val}))::binary"
 
       {:array, _inner, _n} ->
         # Encoded by a per-field helper; here we just splice its result.
@@ -259,13 +245,13 @@ defmodule Flatbuf.Codegen.Struct do
   # Fixed-size array helpers (one defp per array-typed struct field)
   # ----------------------------------------------------------------------
 
-  defp build_array_helpers(s, schema) do
+  defp build_array_helpers(s, schema, ns) do
     s.layout
     |> Enum.filter(fn entry -> match?({:array, _, _}, entry.field.type) end)
-    |> Enum.map_join("\n", fn entry -> array_helper(entry.field, schema) end)
+    |> Enum.map_join("\n", fn entry -> array_helper(entry.field, schema, ns) end)
   end
 
-  defp array_helper(f, schema) do
+  defp array_helper(f, schema, ns) do
     {:array, inner, n} = f.type
     elem_default = inner_default(inner, schema)
 
@@ -274,7 +260,7 @@ defmodule Flatbuf.Codegen.Struct do
         list = Map.get(value, #{inspect(f.name)}, [])
         list = list ++ List.duplicate(#{inspect(elem_default)}, max(0, #{n} - length(list)))
         list = Enum.take(list, #{n})
-        for v <- list, into: <<>>, do: #{array_elem_bin(inner, "v", schema, f.name)}
+        for v <- list, into: <<>>, do: #{array_elem_bin(inner, "v", schema, f.name, ns)}
       end
     """
   end
@@ -288,71 +274,73 @@ defmodule Flatbuf.Codegen.Struct do
     atom
   end
 
-  defp array_elem_bin({:scalar, :bool}, var, _, field_name),
+  defp array_elem_bin({:scalar, :bool}, var, _, field_name, _ns),
     do: "<<(if #{checked(var, :bool, field_name)}, do: 1, else: 0)::8>>"
 
-  defp array_elem_bin({:scalar, kind}, var, _, field_name),
+  defp array_elem_bin({:scalar, kind}, var, _, field_name, _ns),
     do: "<<(#{checked(var, kind, field_name)})::#{scalar_bin_spec(kind)}>>"
 
-  defp array_elem_bin({:enum, fqn}, var, schema, field_name) do
+  defp array_elem_bin({:enum, fqn}, var, schema, field_name, ns) do
     %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
 
-    "<<(#{checked("#{fqn_to_module(fqn)}.value(#{var})", check_kind(u), field_name)})::#{scalar_bin_spec(u)}>>"
+    "<<(#{checked("#{fqn_to_module(fqn, ns)}.value(#{var})", check_kind(u), field_name)})::#{scalar_bin_spec(u)}>>"
   end
 
-  defp array_elem_bin({:struct, fqn}, var, _, _field_name),
-    do: "#{fqn_to_module(fqn)}.encode(#{var})"
+  defp array_elem_bin({:struct, fqn}, var, _, _field_name, ns),
+    do: "#{fqn_to_module(fqn, ns)}.encode(#{var})"
 
   # ----------------------------------------------------------------------
   # JSON map builders
   # ----------------------------------------------------------------------
 
-  defp build_to_json_map(s, schema) do
+  defp build_to_json_map(s, schema, ns) do
     Enum.map_join(s.fields, "", fn f ->
       val = "Map.get(value, #{inspect(f.name)})"
-      expr = json_value_expr(f.type, val, schema)
+      expr = json_value_expr(f.type, val, schema, ns)
       "      #{inspect(Atom.to_string(f.name))} => #{expr},\n"
     end)
   end
 
-  defp build_from_json_map(s, schema) do
+  defp build_from_json_map(s, schema, ns) do
     Enum.map_join(s.fields, "", fn f ->
       val = "Map.get(map, #{inspect(Atom.to_string(f.name))})"
-      expr = json_from_value_expr(f.type, val, schema)
+      expr = json_from_value_expr(f.type, val, schema, ns)
       "      #{f.name}: #{expr},\n"
     end)
   end
 
-  defp json_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
+  defp json_value_expr({:scalar, k}, val, _, _ns) when k in [:f32, :f64] do
     # NaN/Inf aren't valid JSON; emit as strings the way flatc does.
     "(case #{val} do :nan -> \"nan\"; :infinity -> \"inf\"; :neg_infinity -> \"-inf\"; v -> v end)"
   end
 
-  defp json_value_expr({:scalar, _}, val, _), do: val
-  defp json_value_expr({:enum, fqn}, val, _), do: "#{fqn_to_module(fqn)}.__to_json__(#{val})"
+  defp json_value_expr({:scalar, _}, val, _, _ns), do: val
 
-  defp json_value_expr({:struct, fqn}, val, _),
-    do: "#{fqn_to_module(fqn)}.__to_json_map__(#{val})"
+  defp json_value_expr({:enum, fqn}, val, _, ns),
+    do: "#{fqn_to_module(fqn, ns)}.__to_json__(#{val})"
 
-  defp json_value_expr({:array, inner, _n}, val, schema) do
-    inner_expr = json_value_expr(inner, "v", schema)
+  defp json_value_expr({:struct, fqn}, val, _, ns),
+    do: "#{fqn_to_module(fqn, ns)}.__to_json_map__(#{val})"
+
+  defp json_value_expr({:array, inner, _n}, val, schema, ns) do
+    inner_expr = json_value_expr(inner, "v", schema, ns)
     "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
   end
 
-  defp json_from_value_expr({:scalar, k}, val, _) when k in [:f32, :f64] do
+  defp json_from_value_expr({:scalar, k}, val, _, _ns) when k in [:f32, :f64] do
     "(case #{val} do \"nan\" -> :nan; \"inf\" -> :infinity; \"-inf\" -> :neg_infinity; v -> v end)"
   end
 
-  defp json_from_value_expr({:scalar, _}, val, _), do: val
+  defp json_from_value_expr({:scalar, _}, val, _, _ns), do: val
 
-  defp json_from_value_expr({:enum, fqn}, val, _),
-    do: "#{fqn_to_module(fqn)}.__from_json__(#{val})"
+  defp json_from_value_expr({:enum, fqn}, val, _, ns),
+    do: "#{fqn_to_module(fqn, ns)}.__from_json__(#{val})"
 
-  defp json_from_value_expr({:struct, fqn}, val, _),
-    do: "#{fqn_to_module(fqn)}.__from_json_map__(#{val})"
+  defp json_from_value_expr({:struct, fqn}, val, _, ns),
+    do: "#{fqn_to_module(fqn, ns)}.__from_json_map__(#{val})"
 
-  defp json_from_value_expr({:array, inner, _n}, val, schema) do
-    inner_expr = json_from_value_expr(inner, "v", schema)
+  defp json_from_value_expr({:array, inner, _n}, val, schema, ns) do
+    inner_expr = json_from_value_expr(inner, "v", schema, ns)
     "Enum.map(#{val} || [], fn v -> #{inner_expr} end)"
   end
 
@@ -372,5 +360,5 @@ defmodule Flatbuf.Codegen.Struct do
     String.replace(s, ~r/,\n$/, "\n")
   end
 
-  defp fqn_to_module(fqn), do: Naming.module_name(fqn, Process.get(@ns_key))
+  defp fqn_to_module(fqn, ns), do: Naming.module_name(fqn, ns)
 end

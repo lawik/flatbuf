@@ -843,7 +843,41 @@ defmodule Flatbuf.Codegen.Wire do
   """
   @spec generate(module()) :: {module(), String.t()}
   def generate(module_name) when is_atom(module_name) do
-    src = String.replace(@template, "<%= MODULE %>", inspect(module_name))
+    src = fill_template(@template, %{"MODULE" => inspect(module_name)})
     {module_name, src}
+  end
+
+  # Fill every `<%= NAME %>` hole in the template with its value from
+  # `holes`. This is deliberately *not* EEx evaluation: the template
+  # body is a complete Elixir module held in a `~S` sigil, and nothing
+  # in it should be evaluated (or even tokenized) at generation time —
+  # plain validated substitution keeps any future `#{}`/`<%` text in
+  # the body inert.
+  #
+  # Fails loudly in both directions: a hole name that never matches
+  # the template raises (stale key after a template edit), and any
+  # `<%` left after substitution raises (misspelled or unknown marker
+  # in the template).
+  @spec fill_template(String.t(), %{String.t() => String.t()}) :: String.t()
+  defp fill_template(template, holes) do
+    filled =
+      Enum.reduce(holes, template, fn {name, value}, acc ->
+        marker = "<%= #{name} %>"
+
+        if not String.contains?(acc, marker) do
+          raise ArgumentError, "wire template has no #{inspect(marker)} hole"
+        end
+
+        String.replace(acc, marker, value)
+      end)
+
+    case :binary.match(filled, "<%") do
+      :nomatch ->
+        filled
+
+      {pos, _len} ->
+        context = binary_part(filled, pos, min(40, byte_size(filled) - pos))
+        raise ArgumentError, "unfilled hole in wire template at byte #{pos}: #{inspect(context)}"
+    end
   end
 end
