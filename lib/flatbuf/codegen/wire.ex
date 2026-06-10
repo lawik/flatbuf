@@ -246,6 +246,60 @@ defmodule Flatbuf.Codegen.Wire do
     defp compare_keys(a, b), do: if(a < b, do: -1, else: if(a > b, do: 1, else: 0))
 
     # ---------------------------------------------------------------------
+    # Encode-side scalar validation — generated `build/2` code routes
+    # every scalar headed for the wire through these. Elixir binary
+    # construction truncates out-of-range integers silently, so without
+    # this check a `ushort` field happily "encodes" 70_000 as 4_464.
+    # Bad values throw a tagged tuple that the generated `encode/1`
+    # catches and returns as `{:error, _}`.
+    # ---------------------------------------------------------------------
+
+    @doc """
+    Validate a scalar about to be written for `field`. Returns the value
+    unchanged on success. Throws `{:invalid_scalar, field, kind, value}`
+    for a wrong-typed value and `{:scalar_out_of_range, field, kind,
+    value}` for an out-of-range integer.
+    """
+    def check_scalar!(value, :bool, field) do
+      if is_boolean(value), do: value, else: throw({:invalid_scalar, field, :bool, value})
+    end
+
+    # `:nan` / `:infinity` / `:neg_infinity` are this library's spelling
+    # of the IEEE 754 specials; `push_f32/2` and `push_f64/2` write
+    # their bit patterns directly.
+    def check_scalar!(value, kind, field) when kind in [:f32, :f64] do
+      if is_number(value) or value in [:nan, :infinity, :neg_infinity],
+        do: value,
+        else: throw({:invalid_scalar, field, kind, value})
+    end
+
+    def check_scalar!(value, kind, field) do
+      {lo, hi} = scalar_range(kind)
+
+      cond do
+        not is_integer(value) -> throw({:invalid_scalar, field, kind, value})
+        value < lo or value > hi -> throw({:scalar_out_of_range, field, kind, value})
+        true -> value
+      end
+    end
+
+    @doc """
+    Like `check_scalar!/3` but for optional (`= null`) fields, where
+    `nil` means "omit the slot" and passes through untouched.
+    """
+    def check_optional_scalar!(nil, _kind, _field), do: nil
+    def check_optional_scalar!(value, kind, field), do: check_scalar!(value, kind, field)
+
+    defp scalar_range(:i8), do: {-0x80, 0x7F}
+    defp scalar_range(:u8), do: {0, 0xFF}
+    defp scalar_range(:i16), do: {-0x8000, 0x7FFF}
+    defp scalar_range(:u16), do: {0, 0xFFFF}
+    defp scalar_range(:i32), do: {-0x80000000, 0x7FFFFFFF}
+    defp scalar_range(:u32), do: {0, 0xFFFFFFFF}
+    defp scalar_range(:i64), do: {-0x8000000000000000, 0x7FFFFFFFFFFFFFFF}
+    defp scalar_range(:u64), do: {0, 0xFFFFFFFFFFFFFFFF}
+
+    # ---------------------------------------------------------------------
     # Verifier primitives — used by generated `verify/1` to bounds-check
     # every offset before the reader follows it. Returning `:ok` or
     # `{:error, reason}` (no exceptions) keeps the verifier predictable

@@ -597,6 +597,8 @@ defmodule Flatbuf.Codegen.Table do
           {:ok, Wire.to_binary(builder)}
         catch
           {:flatbuf_required, _} = err -> {:error, err}
+          {:scalar_out_of_range, _, _, _} = err -> {:error, err}
+          {:invalid_scalar, _, _, _} = err -> {:error, err}
         end
       end
 
@@ -610,6 +612,8 @@ defmodule Flatbuf.Codegen.Table do
           {:ok, Wire.to_binary(builder)}
         catch
           {:flatbuf_required, _} = err -> {:error, err}
+          {:scalar_out_of_range, _, _, _} = err -> {:error, err}
+          {:invalid_scalar, _, _, _} = err -> {:error, err}
         end
       end
     """
@@ -932,9 +936,12 @@ defmodule Flatbuf.Codegen.Table do
         """
             {b, #{var}} =
               case #{field_lookup} do
-                nil -> {b, nil}
-                [] -> Wire.create_scalar_vector(b, [], #{sz}, #{elem_align}, &Wire.push_#{kind}/2)
-                list when is_list(list) -> Wire.create_scalar_vector(b, list, #{sz}, #{elem_align}, &Wire.push_#{kind}/2)
+                nil ->
+                  {b, nil}
+
+                list when is_list(list) ->
+                  list = Enum.map(list, &Wire.check_scalar!(&1, #{inspect(kind)}, #{inspect(f.name)}))
+                  Wire.create_scalar_vector(b, list, #{sz}, #{elem_align}, &Wire.push_#{kind}/2)
               end
         """
 
@@ -994,6 +1001,7 @@ defmodule Flatbuf.Codegen.Table do
         sz = Schema.scalar_size(u)
         elem_align = max(sz, force)
         mod = fqn_to_module(fqn)
+        check_kind = if u == :bool, do: :u8, else: u
 
         """
             {b, #{var}} =
@@ -1002,7 +1010,9 @@ defmodule Flatbuf.Codegen.Table do
                   {b, nil}
 
                 list when is_list(list) ->
-                  ints = Enum.map(list, &#{mod}.value/1)
+                  ints =
+                    Enum.map(list, &Wire.check_scalar!(#{mod}.value(&1), #{inspect(check_kind)}, #{inspect(f.name)}))
+
                   Wire.create_scalar_vector(b, ints, #{sz}, #{elem_align}, &Wire.push_#{u}/2)
               end
         """
@@ -1054,15 +1064,19 @@ defmodule Flatbuf.Codegen.Table do
 
     case f.type do
       {:scalar, kind} ->
+        # `= null` marks the field optional: nil is the omission
+        # sentinel (so the slot is skipped when absent), and the
+        # validator lets nil pass through.
+        optional? = f.default == :null
         default = default_value(f, schema)
-        default_expr = literal_for_scalar(default, kind)
 
         raw_value =
-          "Map.get(value, #{inspect(f.name)}, #{inspect(default_value(f, schema))})"
+          "Map.get(value, #{inspect(f.name)}, #{inspect(default)})"
 
         # `(hash: "fnv1_32")` etc. lets the user pass a string in place
         # of the int; the encoder hashes it on the way down. Integers
-        # pass through unchanged.
+        # pass through unchanged. Validation runs post-hash, on the
+        # integer headed for the wire.
         value_expr =
           case Map.get(f.attributes, :hash) do
             nil ->
@@ -1072,25 +1086,18 @@ defmodule Flatbuf.Codegen.Table do
               "Wire.maybe_hash(#{raw_value}, #{inspect(String.to_atom(alg))})"
           end
 
-        coerced =
-          if kind == :bool do
-            "(if #{value_expr}, do: 1, else: 0)"
-          else
-            value_expr
-          end
+        check_fn =
+          if optional?, do: "Wire.check_optional_scalar!", else: "Wire.check_scalar!"
+
+        checked = "#{check_fn}(#{value_expr}, #{inspect(kind)}, #{inspect(f.name)})"
 
         push_fn =
-          if kind == :bool, do: "&Wire.push_u8/2", else: "&Wire.push_#{kind}/2"
+          if kind == :bool, do: "&Wire.push_bool/2", else: "&Wire.push_#{kind}/2"
 
-        default_for_push =
-          if kind == :bool do
-            if default, do: 1, else: 0
-          else
-            default_expr
-          end
+        default_for_push = if optional?, do: nil, else: default
 
         """
-            b = Wire.add_field_scalar(b, #{slot}, #{coerced}, #{inspect(default_for_push)}, #{push_fn})
+            b = Wire.add_field_scalar(b, #{slot}, #{checked}, #{inspect(default_for_push)}, #{push_fn})
         """
 
       :string ->
@@ -1127,18 +1134,43 @@ defmodule Flatbuf.Codegen.Table do
 
       {:enum, fqn} ->
         %SchemaEnum{underlying_type: u} = enum_rec = Schema.fetch(schema, fqn)
+        optional? = f.default == :null
         default = default_value(f, schema)
         mod = fqn_to_module(fqn)
-        default_int = enum_default_int(enum_rec, default)
-
-        value_atom = "Map.get(value, #{inspect(f.name)}, #{inspect(default)})"
-        value_expr = "#{mod}.value(#{value_atom})"
 
         push_fn =
           if u == :bool, do: "&Wire.push_u8/2", else: "&Wire.push_#{u}/2"
 
+        check_kind = if u == :bool, do: :u8, else: u
+
+        checked =
+          "Wire.check_scalar!(#{mod}.value(v), #{inspect(check_kind)}, #{inspect(f.name)})"
+
+        # A nil value means: omit when the field is optional (`= null`)
+        # or has no representable default (empty enum); otherwise it's
+        # a wrong-typed value and gets the same tagged throw the
+        # scalar validator uses.
+        nil_branch =
+          if optional? or default == nil do
+            "b"
+          else
+            "throw({:invalid_scalar, #{inspect(f.name)}, #{inspect(check_kind)}, nil})"
+          end
+
+        {lookup, default_for_push} =
+          if optional? do
+            {"Map.get(value, #{inspect(f.name)})", nil}
+          else
+            {"Map.get(value, #{inspect(f.name)}, #{inspect(default)})",
+             enum_default_int(enum_rec, default)}
+          end
+
         """
-            b = Wire.add_field_scalar(b, #{slot}, #{value_expr}, #{default_int}, #{push_fn})
+            b =
+              case #{lookup} do
+                nil -> #{nil_branch}
+                v -> Wire.add_field_scalar(b, #{slot}, #{checked}, #{inspect(default_for_push)}, #{push_fn})
+              end
         """
 
       {:struct, fqn} ->
@@ -1165,13 +1197,6 @@ defmodule Flatbuf.Codegen.Table do
         """
     end
   end
-
-  defp literal_for_scalar(v, _kind) when is_number(v), do: v
-  defp literal_for_scalar(v, _kind) when is_boolean(v), do: if(v, do: 1, else: 0)
-  defp literal_for_scalar(nil, _kind), do: 0
-  # NaN/Infinity default literals — emit them as atoms; the wire helper
-  # writes the IEEE 754 bit pattern when these come through push_f32/f64.
-  defp literal_for_scalar(atom, _kind) when atom in [:nan, :infinity, :neg_infinity], do: atom
 
   # -----------------------------------------------------------------------
   # Verifier
