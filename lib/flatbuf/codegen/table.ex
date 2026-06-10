@@ -16,6 +16,7 @@ defmodule Flatbuf.Codegen.Table do
   alias Flatbuf.Schema.Enum, as: SchemaEnum
   alias Flatbuf.Schema.Struct, as: SchemaStruct
   alias Flatbuf.Schema.Table
+  alias Flatbuf.Schema.Union, as: SchemaUnion
 
   @ns_key :flatbuf_codegen_table_namespace
 
@@ -400,12 +401,14 @@ defmodule Flatbuf.Codegen.Table do
   defp field_decode_body(f, schema) do
     case f.type do
       {:union, fqn} ->
-        # Union fields use two adjacent vtable slots: discriminator (u8)
+        # Union fields use two adjacent vtable slots: discriminator
+        # (the union's underlying type, u8 unless declared otherwise)
         # at `vtable_slot - 2`, value (uoffset) at `vtable_slot`. This
         # matches both the auto-expanded case (slot allocated as the
         # higher of a pair) and the explicit-id case (where the schema's
         # `(id: N)` refers to the value slot).
         disc_slot = f.vtable_slot - 2
+        {u, _sz} = union_disc_info(fqn, schema)
 
         """
               case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
@@ -414,7 +417,7 @@ defmodule Flatbuf.Codegen.Table do
                   case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
                     0 -> nil
                     value_o ->
-                      disc = Wire.read_u8(buf, pos + type_o)
+                      disc = Wire.read_#{u}(buf, pos + type_o)
                       abs_pos = Wire.follow_uoffset(buf, pos + value_o)
                       #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
                   end
@@ -425,12 +428,14 @@ defmodule Flatbuf.Codegen.Table do
 
       {:vector, {:union, fqn}} ->
         # Vectors of unions are stored as two parallel vectors in the
-        # vtable: a `[u8]` of discriminators at `vtable_slot - 2` and
-        # a `[uoffset]` of variant values at `vtable_slot`. A NONE
+        # vtable: a vector of underlying-typed discriminators (u8
+        # unless declared otherwise) at `vtable_slot - 2` and a
+        # `[uoffset]` of variant values at `vtable_slot`. A NONE
         # (discriminator 0) element decodes to nil without touching
         # its value slot — flatc's verifier deliberately leaves that
         # slot uninspected, so its bytes are not to be trusted.
         disc_slot = f.vtable_slot - 2
+        {u, sz} = union_disc_info(fqn, schema)
 
         """
               case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
@@ -446,7 +451,7 @@ defmodule Flatbuf.Codegen.Table do
                         []
                       else
                         for i <- 0..(count - 1) do
-                          case Wire.read_u8(buf, Wire.vector_elem_pos(types_abs, i, 1)) do
+                          case Wire.read_#{u}(buf, Wire.vector_elem_pos(types_abs, i, #{sz})) do
                             0 ->
                               nil
 
@@ -854,6 +859,7 @@ defmodule Flatbuf.Codegen.Table do
         # Two locals: the type vector's addr and the value vector's.
         types_var = "addr_#{f.name}_types"
         mod = fqn_to_module(fqn)
+        {u, sz} = union_disc_info(fqn, schema)
 
         line = """
             {b, #{types_var}, #{var}} =
@@ -878,7 +884,7 @@ defmodule Flatbuf.Codegen.Table do
                   discs = Enum.map(pairs, &elem(&1, 0))
                   addrs = Enum.map(pairs, &elem(&1, 1))
                   {b, vals_addr} = Wire.create_offset_vector(b, addrs)
-                  {b, types_addr} = Wire.create_scalar_vector(b, discs, 1, 1, &Wire.push_u8/2)
+                  {b, types_addr} = Wire.create_scalar_vector(b, discs, #{sz}, #{sz}, &Wire.push_#{u}/2)
                   {b, types_addr, vals_addr}
               end
         """
@@ -1195,17 +1201,27 @@ defmodule Flatbuf.Codegen.Table do
               end
         """
 
-      {:union, _fqn} ->
-        # `slot` is the value slot; discriminator lives at slot - 2.
+      {:union, fqn} ->
+        # `slot` is the value slot; discriminator lives at slot - 2 and
+        # is written at the union's underlying width.
         disc_slot = slot - 2
         disc_var = "disc_#{f.name}"
         addr_var = "addr_#{f.name}"
+        {u, _sz} = union_disc_info(fqn, schema)
 
         """
             b = Wire.add_field_offset(b, #{slot}, #{addr_var})
-            b = Wire.add_field_scalar(b, #{disc_slot}, #{disc_var}, 0, &Wire.push_u8/2)
+            b = Wire.add_field_scalar(b, #{disc_slot}, #{disc_var}, 0, &Wire.push_#{u}/2)
         """
     end
+  end
+
+  # The wire type and byte width of a union's discriminator — `:u8`/1
+  # historically, wider when the schema declares an underlying type
+  # (`union U : int { … }`).
+  defp union_disc_info(fqn, schema) do
+    %SchemaUnion{underlying_type: u} = Schema.fetch(schema, fqn)
+    {u, Schema.scalar_size(u)}
   end
 
   # -----------------------------------------------------------------------
@@ -1309,7 +1325,7 @@ defmodule Flatbuf.Codegen.Table do
         """
 
       {:vector, {:union, fqn}} ->
-        verify_union_vector_field(f, fqn)
+        verify_union_vector_field(f, fqn, schema)
 
       {:vector, inner} ->
         verify_vector_field(f, inner, schema)
@@ -1331,18 +1347,19 @@ defmodule Flatbuf.Codegen.Table do
       {:union, fqn} ->
         mod = fqn_to_module(fqn)
         disc_slot = f.vtable_slot - 2
+        {u, sz} = union_disc_info(fqn, schema)
 
         """
         :ok <- (case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
                   0 -> :ok
                   type_o ->
-                    with :ok <- Wire.verify_inline_field(inline_size, type_o, 1) do
+                    with :ok <- Wire.verify_inline_field(inline_size, type_o, #{sz}) do
                       case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
                         0 -> :ok
                         value_o ->
                           with :ok <- Wire.verify_inline_field(inline_size, value_o, 4),
                                {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o) do
-                            disc = Wire.read_u8(buf, pos + type_o)
+                            disc = Wire.read_#{u}(buf, pos + type_o)
                             #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1)
                           end
                       end
@@ -1365,9 +1382,10 @@ defmodule Flatbuf.Codegen.Table do
   # flatc's generated Verify<Union>Vector: both-or-neither present,
   # equal element counts, and NONE (discriminator 0) elements verified
   # by skipping their value slot entirely.
-  defp verify_union_vector_field(f, fqn) do
+  defp verify_union_vector_field(f, fqn, schema) do
     mod = fqn_to_module(fqn)
     disc_slot = f.vtable_slot - 2
+    {u, sz} = union_disc_info(fqn, schema)
 
     """
     :ok <- (case {Wire.read_vtable_field(buf, pos, #{disc_slot}),
@@ -1383,14 +1401,14 @@ defmodule Flatbuf.Codegen.Table do
                      :ok <- Wire.verify_inline_field(inline_size, value_o, 4),
                      {:ok, types_pos} <- Wire.verify_follow_uoffset(buf, pos + type_o),
                      {:ok, vals_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o),
-                     {:ok, types_count} <- Wire.verify_vector_at(buf, types_pos, 1),
+                     {:ok, types_count} <- Wire.verify_vector_at(buf, types_pos, #{sz}),
                      {:ok, values_count} <- Wire.verify_vector_at(buf, vals_pos, 4),
                      :ok <-
                        (if types_count == values_count,
                           do: :ok,
                           else: {:error, {:union_vector_count_mismatch, #{inspect(f.name)}, types_count, values_count}}) do
                   Enum.reduce_while(0..(types_count - 1)//1, :ok, fn i, _ ->
-                    case Wire.read_u8(buf, Wire.vector_elem_pos(types_pos, i, 1)) do
+                    case Wire.read_#{u}(buf, Wire.vector_elem_pos(types_pos, i, #{sz})) do
                       0 ->
                         {:cont, :ok}
 

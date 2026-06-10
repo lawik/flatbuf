@@ -56,6 +56,14 @@ defmodule Flatbuf.Codegen.Union do
 
     wire_alias = if needs_wire?, do: "  alias #{inspect(wire_module)}, as: Wire\n", else: ""
 
+    # A signed underlying type (`union U : int { … }`) admits negative
+    # discriminator values, so the spec widens from the historical
+    # non_neg_integer().
+    disc_t =
+      if u.underlying_type in [:i8, :i16, :i32, :i64],
+        do: "integer()",
+        else: "non_neg_integer()"
+
     source = """
     defmodule #{module_name} do
       @moduledoc "Generated from FlatBuffers union #{u.name}. Do not edit."
@@ -64,11 +72,11 @@ defmodule Flatbuf.Codegen.Union do
       @type t :: #{type_spec}
 
       @doc "Integer discriminator for a variant atom (0 for :NONE)."
-      @spec discriminator(atom()) :: non_neg_integer()
+      @spec discriminator(atom()) :: #{disc_t}
       def discriminator(:NONE), do: 0
     #{disc_clauses}
       @doc "Variant atom for an integer discriminator."
-      @spec variant_atom(non_neg_integer()) :: atom() | nil
+      @spec variant_atom(#{disc_t}) :: atom() | nil
       def variant_atom(0), do: :NONE
     #{atom_clauses}  def variant_atom(_), do: nil
 
@@ -135,8 +143,15 @@ defmodule Flatbuf.Codegen.Union do
     end)
   end
 
+  # flatc permits two variants sharing one discriminator value; the
+  # first declaration wins on the read side (same as a C++ enum with
+  # duplicate enumerators). Dedup keeps the generated clause heads
+  # from triggering "this clause cannot match" warnings.
+  defp dedup_by_disc(variants), do: Enum.uniq_by(variants, fn {_name, _type, disc} -> disc end)
+
   defp build_atom_clauses(u) do
     u.variants
+    |> dedup_by_disc()
     |> Enum.map_join("", fn {name, _type, disc} ->
       "  def variant_atom(#{disc}), do: #{inspect(name)}\n"
     end)
@@ -144,6 +159,7 @@ defmodule Flatbuf.Codegen.Union do
 
   defp build_decode_clauses(u, _schema) do
     u.variants
+    |> dedup_by_disc()
     |> Enum.map_join("", fn {name, type, disc} ->
       body =
         case type do
@@ -211,6 +227,7 @@ defmodule Flatbuf.Codegen.Union do
 
   defp build_verify_clauses(u) do
     u.variants
+    |> dedup_by_disc()
     |> Enum.map_join("", fn {_name, type, disc} ->
       # Only the table variant recurses with `depth - 1`; struct and
       # string variants ignore depth, so underscore it on those clauses

@@ -136,7 +136,7 @@
   "ts/test_dir/typescript_transitive_include.fbs" => :ok,
   "ts/typescript_keywords.fbs" => :ok,
   "type_field_collsion.fbs" => :ok,
-  "union_underlying_type_test.fbs" => {:error, {:expected_punct, :lbrace, :punct}},
+  "union_underlying_type_test.fbs" => :ok,
   "union_value_collision.fbs" => :ok,
   "union_vector/union_vector.fbs" => :ok,
   "vector_has_test.fbs" => :ok,

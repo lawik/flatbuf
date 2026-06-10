@@ -524,4 +524,104 @@ defmodule Flatbuf.Schema.ResolverTest do
     assert {:error, {:default_out_of_range, "T", "b", 300, :u8, 3}} =
              Resolver.resolve_source(src)
   end
+
+  describe "union underlying types" do
+    alias Flatbuf.Schema.Union
+
+    @tables "table A { x:int; } table B { y:int; }\n"
+
+    test "the upstream int-typed union resolves with explicit discriminators" do
+      src = @tables <> "union ABC : int { A = 555, B = 666 }"
+
+      assert {:ok, schema} = Resolver.resolve_source(src)
+      assert %Union{underlying_type: :i32, variants: variants} = schema.types["ABC"]
+      assert [{:A, {:table, "A"}, 555}, {:B, {:table, "B"}, 666}] = variants
+    end
+
+    test "no underlying type defaults to the historical u8 with discs 1, 2, …" do
+      {:ok, schema} = Resolver.resolve_source(@tables <> "union U { A, B }")
+      assert %Union{underlying_type: :u8, variants: [{:A, _, 1}, {:B, _, 2}]} = schema.types["U"]
+    end
+
+    test "implicit values increment from the previous explicit one (flatc parity)" do
+      {:ok, schema} = Resolver.resolve_source(@tables <> "union U : int { A = 5, B }")
+      assert %Union{variants: [{:A, _, 5}, {:B, _, 6}]} = schema.types["U"]
+    end
+
+    test "every integral scalar (and aliases) is accepted at its width" do
+      for {name, kind} <- [
+            {"byte", :i8},
+            {"ubyte", :u8},
+            {"short", :i16},
+            {"ushort", :u16},
+            {"int", :i32},
+            {"uint", :u32},
+            {"long", :i64},
+            {"ulong", :u64},
+            {"int32", :i32},
+            {"uint64", :u64}
+          ] do
+        {:ok, schema} = Resolver.resolve_source(@tables <> "union U : #{name} { A }")
+        assert %Union{underlying_type: ^kind} = schema.types["U"]
+      end
+    end
+
+    test "a previously declared enum as underlying type inherits its width" do
+      src = "enum E : short { X }\n" <> @tables <> "union U : E { A }"
+      {:ok, schema} = Resolver.resolve_source(src)
+      assert %Union{underlying_type: :i16} = schema.types["U"]
+    end
+
+    test "a forward-declared enum is rejected, like flatc's single-pass lookup" do
+      src = @tables <> "union U : E { A }\nenum E : short { X }"
+
+      assert {:error, {:union_underlying_not_integral, "U", "E", _}} =
+               Resolver.resolve_source(src)
+    end
+
+    test "non-integral underlying types are rejected (flatc: must be integral)" do
+      for bad <- ["float", "double", "bool", "string", "A", "Nope"] do
+        assert {:error, {:union_underlying_not_integral, "U", _, _}} =
+                 Resolver.resolve_source(@tables <> "union U : #{bad} { A }")
+      end
+    end
+
+    test "explicit values must fit the underlying type" do
+      assert {:error, {:union_value_out_of_range, "U", "A", 200, _}} =
+               Resolver.resolve_source(@tables <> "union U : byte { A = 200 }")
+
+      assert {:error, {:union_value_out_of_range, "U", "A", 300, _}} =
+               Resolver.resolve_source(@tables <> "union U : ubyte { A = 300 }")
+
+      assert {:error, {:union_value_out_of_range, "U", "A", -1, _}} =
+               Resolver.resolve_source(@tables <> "union U : uint { A = -1 }")
+    end
+
+    test "auto-increment past the underlying type's range is an error" do
+      assert {:error, {:union_value_out_of_range, "U", "B", 128, _}} =
+               Resolver.resolve_source(@tables <> "union U : byte { A = 127, B }")
+    end
+
+    test "classic unions take explicit values too, range-checked against u8" do
+      {:ok, schema} = Resolver.resolve_source(@tables <> "union U { A = 1, B = 5 }")
+      assert %Union{underlying_type: :u8, variants: [{:A, _, 1}, {:B, _, 5}]} = schema.types["U"]
+
+      assert {:error, {:union_value_out_of_range, "U", "A", 300, _}} =
+               Resolver.resolve_source(@tables <> "union U { A = 300 }")
+    end
+
+    test "negative discriminators are legal with a signed underlying type" do
+      {:ok, schema} = Resolver.resolve_source(@tables <> "union U : int { A = -5 }")
+      assert %Union{variants: [{:A, _, -5}]} = schema.types["U"]
+    end
+
+    test "value 0 collides with the implicit NONE (flatc parity)" do
+      assert {:error, {:union_value_collides_with_none, "U", "A", _}} =
+               Resolver.resolve_source(@tables <> "union U : int { A = 0 }")
+    end
+
+    test "duplicate values between variants are accepted (flatc accepts them)" do
+      assert {:ok, _} = Resolver.resolve_source(@tables <> "union U : int { A = 5, B = 5 }")
+    end
+  end
 end

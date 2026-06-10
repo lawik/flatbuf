@@ -99,4 +99,39 @@ defmodule Flatbuf.Schema.ParserTest do
     {:ok, [{:struct, body}]} = Parser.parse("struct S { a:[int:3]; }")
     assert [%{type: {:array, {:scalar, :i32}, 3}}] = body.fields
   end
+
+  describe "union underlying types" do
+    test "scalar underlying type and explicit discriminator values" do
+      {:ok, [{:union, body}]} = Parser.parse("union ABC : int { A = 555, B = 666, C = 777 }")
+      assert body.underlying_type == {:scalar, :i32}
+      assert Enum.map(body.variants, & &1.name) == ["A", "B", "C"]
+      assert Enum.map(body.variants, & &1.value) == [555, 666, 777]
+    end
+
+    test "no underlying type stays nil; implicit values stay nil" do
+      {:ok, [{:union, body}]} = Parser.parse("union U { A, B }")
+      assert body.underlying_type == nil
+      assert Enum.map(body.variants, & &1.value) == [nil, nil]
+    end
+
+    test "a named (enum) underlying type is recorded as a name ref" do
+      {:ok, [{:union, body}]} = Parser.parse("union U : Some.Enum { A }")
+      assert body.underlying_type == {:name, "Some.Enum"}
+    end
+
+    test "aliased and dotted variants take explicit values too" do
+      {:ok, [{:union, body}]} = Parser.parse("union U { alias: B = 5, Some.C = 9 }")
+      assert Enum.map(body.variants, & &1.name) == ["alias", "Some_C"]
+      assert Enum.map(body.variants, & &1.value) == [5, 9]
+    end
+
+    test "negative explicit values parse (range is the resolver's call)" do
+      {:ok, [{:union, body}]} = Parser.parse("union U : int { A = -5 }")
+      assert Enum.map(body.variants, & &1.value) == [-5]
+    end
+
+    test "a non-integer variant value is a parse error" do
+      assert {:error, {:bad_union_value, {:float, 1.5}}} = Parser.parse("union U { A = 1.5 }")
+    end
+  end
 end
