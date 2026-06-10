@@ -67,6 +67,22 @@
     "lbrace",
     "rbrace",
     "lbracket",
-    "rbracket"
+    "rbracket",
+    "bignums",
+    "callsite",
+    "dedups",
+    "dups",
+    "fname",
+    "includer",
+    "lawik",
+    "mtimes",
+    "nstandard",
+    "overpromises",
+    "signedness",
+    "spellweaver",
+    "topo",
+    "underdelivering",
+    "uninspected",
+    "vname"
   ]
 }
