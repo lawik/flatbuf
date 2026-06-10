@@ -58,15 +58,58 @@
   "private_annotation_test.fbs" => :ok,
   "prototest/test.golden.fbs" => :ok,
   "prototest/test_id.golden.fbs" => :ok,
-  "prototest/test_include.golden.fbs" => {:error, {:cannot_read, "imported.fbs", :enoent}},
-  "prototest/test_include_id.golden.fbs" => {:error, {:cannot_read, "imported.fbs", :enoent}},
+  "prototest/test_include.golden.fbs" =>
+    {:error,
+     {:include_not_found, "imported.fbs",
+      "test/fixtures/upstream/tests/prototest/test_include.golden.fbs",
+      [
+        "test/fixtures/upstream/tests/prototest/imported.fbs",
+        "test/fixtures/upstream/tests/imported.fbs",
+        "test/fixtures/upstream/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/sub/imported.fbs",
+        "test/fixtures/upstream/tests/flatc/imported.fbs"
+      ]}},
+  "prototest/test_include_id.golden.fbs" =>
+    {:error,
+     {:include_not_found, "imported.fbs",
+      "test/fixtures/upstream/tests/prototest/test_include_id.golden.fbs",
+      [
+        "test/fixtures/upstream/tests/prototest/imported.fbs",
+        "test/fixtures/upstream/tests/imported.fbs",
+        "test/fixtures/upstream/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/sub/imported.fbs",
+        "test/fixtures/upstream/tests/flatc/imported.fbs"
+      ]}},
   "prototest/test_suffix.golden.fbs" => :ok,
   "prototest/test_suffix_id.golden.fbs" => :ok,
   "prototest/test_union.golden.fbs" => :ok,
   "prototest/test_union_id.golden.fbs" => :ok,
-  "prototest/test_union_include.golden.fbs" => {:error, {:cannot_read, "imported.fbs", :enoent}},
+  "prototest/test_union_include.golden.fbs" =>
+    {:error,
+     {:include_not_found, "imported.fbs",
+      "test/fixtures/upstream/tests/prototest/test_union_include.golden.fbs",
+      [
+        "test/fixtures/upstream/tests/prototest/imported.fbs",
+        "test/fixtures/upstream/tests/imported.fbs",
+        "test/fixtures/upstream/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/sub/imported.fbs",
+        "test/fixtures/upstream/tests/flatc/imported.fbs"
+      ]}},
   "prototest/test_union_include_id.golden.fbs" =>
-    {:error, {:cannot_read, "imported.fbs", :enoent}},
+    {:error,
+     {:include_not_found, "imported.fbs",
+      "test/fixtures/upstream/tests/prototest/test_union_include_id.golden.fbs",
+      [
+        "test/fixtures/upstream/tests/prototest/imported.fbs",
+        "test/fixtures/upstream/tests/imported.fbs",
+        "test/fixtures/upstream/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/sub/imported.fbs",
+        "test/fixtures/upstream/tests/flatc/imported.fbs"
+      ]}},
   "prototest/test_union_suffix.golden.fbs" => :ok,
   "prototest/test_union_suffix_id.golden.fbs" => :ok,
   "required_strings.fbs" => :ok,
@@ -75,7 +118,17 @@
   "swift/fuzzer/CodeGenerationTests/test_import.fbs" => :ok,
   "swift/fuzzer/CodeGenerationTests/test_no_include.fbs" => :ok,
   "swift/fuzzer/Sources/fuzzer/fuzzer.fbs" => :ok,
-  "test.fbs" => {:error, {:cannot_read, "imported.fbs", :enoent}},
+  "test.fbs" =>
+    {:error,
+     {:include_not_found, "imported.fbs", "test/fixtures/upstream/tests/test.fbs",
+      [
+        "test/fixtures/upstream/tests/imported.fbs",
+        "test/fixtures/upstream/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/imported.fbs",
+        "test/fixtures/upstream/tests/include_test/sub/imported.fbs",
+        "test/fixtures/upstream/tests/prototest/imported.fbs",
+        "test/fixtures/upstream/tests/flatc/imported.fbs"
+      ]}},
   "ts/arrays_test_complex/arrays_test_complex.fbs" => :ok,
   "ts/bazel_repository_test_dir/one.fbs" => :ok,
   "ts/bazel_repository_test_dir/two.fbs" => :ok,

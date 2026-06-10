@@ -13,7 +13,8 @@ defmodule Flatbuf.Schema.Field do
           default: any(),
           vtable_slot: non_neg_integer() | nil,
           attributes: map(),
-          docs: [String.t()]
+          docs: [String.t()],
+          line: pos_integer() | nil
         }
 
   defstruct name: nil,
@@ -21,5 +22,6 @@ defmodule Flatbuf.Schema.Field do
             default: nil,
             vtable_slot: nil,
             attributes: %{},
-            docs: []
+            docs: [],
+            line: nil
 end

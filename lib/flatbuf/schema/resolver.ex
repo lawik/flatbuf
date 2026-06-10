@@ -59,7 +59,7 @@ defmodule Flatbuf.Schema.Resolver do
            {:ok, decls} <- Parser.parse(src) do
         seen2 = Map.put(seen, path, true)
         acc2 = acc ++ [{path, decls}]
-        load_includes(decls, Path.dirname(path), include_paths, seen2, acc2)
+        load_includes(decls, path, include_paths, seen2, acc2)
       end
     end
   end
@@ -71,54 +71,62 @@ defmodule Flatbuf.Schema.Resolver do
     end
   end
 
-  defp load_includes([], _base, _ip, seen, acc), do: {:ok, seen, acc}
+  defp load_includes([], _includer, _ip, seen, acc), do: {:ok, seen, acc}
 
-  defp load_includes([{:include, rel, _line} | rest], base, include_paths, seen, acc) do
-    case resolve_include(rel, base, include_paths) do
+  defp load_includes([{:include, rel, _line} | rest], includer, include_paths, seen, acc) do
+    case resolve_include(rel, includer, include_paths) do
       {:ok, full} ->
         case load_all(full, include_paths, seen, acc) do
           {:ok, seen2, acc2} ->
-            load_includes(rest, base, include_paths, seen2, acc2)
+            load_includes(rest, includer, include_paths, seen2, acc2)
 
           err ->
             err
         end
 
       :not_found ->
-        {:error, {:cannot_read, rel, :enoent}}
+        searched = include_candidates(rel, includer, include_paths)
+
+        {:error,
+         {:include_not_found, rel, Path.relative_to_cwd(includer),
+          Enum.map(searched, &Path.relative_to_cwd/1)}}
     end
   end
 
-  defp load_includes([_ | rest], base, include_paths, seen, acc),
-    do: load_includes(rest, base, include_paths, seen, acc)
+  defp load_includes([_ | rest], includer, include_paths, seen, acc),
+    do: load_includes(rest, includer, include_paths, seen, acc)
 
   # First try the including file's own directory (standard flatc behaviour),
   # then each `-I` search path in order.
-  defp resolve_include(rel, base, include_paths) do
-    candidates = [
-      Path.expand(Path.join(base, rel)) | Enum.map(include_paths, &Path.join(&1, rel))
-    ]
-
-    case Enum.find(candidates, &File.regular?/1) do
+  defp resolve_include(rel, includer, include_paths) do
+    case Enum.find(include_candidates(rel, includer, include_paths), &File.regular?/1) do
       nil -> :not_found
       path -> {:ok, path}
     end
+  end
+
+  defp include_candidates(rel, includer, include_paths) do
+    Enum.uniq([
+      Path.expand(Path.join(Path.dirname(includer), rel))
+      | Enum.map(include_paths, &Path.join(&1, rel))
+    ])
   end
 
   # Normalize per-file declarations into a Schema --------------------------
 
   defp normalize(files) do
     schema = %Schema{source_files: Enum.map(files, &elem(&1, 0))}
-    schema = Enum.reduce(files, schema, &collect_decls/2)
-    {:ok, finalize(schema)}
+
+    {schema, root} =
+      Enum.reduce(files, {schema, nil}, fn {_file, decls}, {sch, root} ->
+        state = %{namespace: nil, schema: sch, root: root}
+        final = Enum.reduce(decls, state, &add_decl/2)
+        {final.schema, final.root}
+      end)
+
+    {:ok, finalize(schema, root)}
   catch
     {:resolve_error, reason} -> {:error, reason}
-  end
-
-  defp collect_decls({_file, decls}, schema) do
-    state = %{namespace: nil, schema: schema}
-    final = Enum.reduce(decls, state, &add_decl/2)
-    final.schema
   end
 
   defp add_decl({:namespace, name, _line}, state),
@@ -126,10 +134,10 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp add_decl({:include, _path, _line}, state), do: state
 
-  defp add_decl({:root_type, name, _line}, state) do
-    fqn = qualify(name, state.namespace)
-    %{state | schema: %{state.schema | root_type: fqn}}
-  end
+  # Recorded with the namespace in effect at the declaration site and
+  # resolved at finalize time, once every type is known.
+  defp add_decl({:root_type, name, line}, state),
+    do: %{state | root: {name, state.namespace, line}}
 
   defp add_decl({:file_identifier, id, _line}, state) do
     if byte_size(id) != 4 do
@@ -149,21 +157,13 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp add_decl({:table, body}, state) do
     fqn = qualify(body.name, state.namespace)
+    check_duplicate_field_names(fqn, body.fields)
 
     table = %Table{
       name: fqn,
       namespace: state.namespace,
       short_name: body.name,
-      fields:
-        Enum.map(body.fields, fn f ->
-          %Field{
-            name: String.to_atom(f.name),
-            type: f.type,
-            default: f.default,
-            attributes: normalize_attrs(f.attributes),
-            docs: f.docs
-          }
-        end),
+      fields: Enum.map(body.fields, &build_field/1),
       attributes: normalize_attrs(body.attributes),
       docs: body.docs
     }
@@ -174,20 +174,23 @@ defmodule Flatbuf.Schema.Resolver do
   defp add_decl({:struct, body}, state) do
     fqn = qualify(body.name, state.namespace)
 
+    if body.fields == [] do
+      throw({:resolve_error, {:empty_struct, fqn, body.line}})
+    end
+
+    check_duplicate_field_names(fqn, body.fields)
+
+    Enum.each(body.fields, fn f ->
+      if f.default != nil do
+        throw({:resolve_error, {:default_on_struct_field, fqn, f.name, f.line}})
+      end
+    end)
+
     struct_rec = %SchemaStruct{
       name: fqn,
       namespace: state.namespace,
       short_name: body.name,
-      fields:
-        Enum.map(body.fields, fn f ->
-          %Field{
-            name: String.to_atom(f.name),
-            type: f.type,
-            default: f.default,
-            attributes: normalize_attrs(f.attributes),
-            docs: f.docs
-          }
-        end),
+      fields: Enum.map(body.fields, &build_field/1),
       attributes: normalize_attrs(body.attributes),
       docs: body.docs
     }
@@ -197,6 +200,12 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp add_decl({:union, body}, state) do
     fqn = qualify(body.name, state.namespace)
+    check_duplicate_names(body.variants, &{:duplicate_union_variant, fqn, &1, &2})
+
+    # Discriminator 0 is NONE, so a u8 leaves room for 255 variants.
+    if length(body.variants) > 255 do
+      throw({:resolve_error, {:too_many_union_variants, fqn, length(body.variants)}})
+    end
 
     variants =
       body.variants
@@ -221,13 +230,15 @@ defmodule Flatbuf.Schema.Resolver do
     fqn = qualify(body.name, state.namespace)
     attrs = normalize_attrs(body.attributes)
     bit_flags? = Map.has_key?(attrs, :bit_flags)
-    variants = compute_enum_values(body.variants, bit_flags?)
 
     underlying =
       case body.underlying_type do
-        :string -> throw({:resolve_error, {:bad_enum_underlying, fqn}})
-        other -> other
+        u when u in [:i8, :u8, :i16, :u16, :i32, :u32, :i64, :u64] -> u
+        other -> throw({:resolve_error, {:bad_enum_underlying, fqn, other}})
       end
+
+    check_duplicate_names(body.variants, &{:duplicate_enum_variant, fqn, &1, &2})
+    variants = compute_enum_values(body.variants, bit_flags?, fqn, underlying)
 
     enum = %SchemaEnum{
       name: fqn,
@@ -243,6 +254,30 @@ defmodule Flatbuf.Schema.Resolver do
     %{state | schema: put_type(state.schema, fqn, enum)}
   end
 
+  defp build_field(f) do
+    %Field{
+      name: String.to_atom(f.name),
+      type: f.type,
+      default: f.default,
+      attributes: normalize_attrs(f.attributes),
+      docs: f.docs,
+      line: f.line
+    }
+  end
+
+  defp check_duplicate_field_names(fqn, fields),
+    do: check_duplicate_names(fields, &{:duplicate_field, fqn, &1, &2})
+
+  defp check_duplicate_names(entries, error_fun) do
+    Enum.reduce(entries, MapSet.new(), fn entry, seen ->
+      if MapSet.member?(seen, entry.name) do
+        throw({:resolve_error, error_fun.(entry.name, entry.line)})
+      end
+
+      MapSet.put(seen, entry.name)
+    end)
+  end
+
   defp put_type(schema, fqn, rec) do
     if Map.has_key?(schema.types, fqn) do
       throw({:resolve_error, {:duplicate_type, fqn}})
@@ -253,7 +288,7 @@ defmodule Flatbuf.Schema.Resolver do
 
   # Finalization: resolve forward refs and compute layouts -----------------
 
-  defp finalize(schema) do
+  defp finalize(schema, root) do
     schema = %{
       schema
       | types: Map.new(schema.types, fn {k, v} -> {k, resolve_refs(v, schema)} end)
@@ -273,11 +308,21 @@ defmodule Flatbuf.Schema.Resolver do
     # be set first.
     schema = layout_all_structs(schema)
 
-    if schema.root_type && !Map.has_key?(schema.types, schema.root_type) do
-      throw({:resolve_error, {:unknown_root_type, schema.root_type}})
-    end
+    resolve_root(schema, root)
+  end
 
-    schema
+  # flatc resolves `root_type Name` by trying the name as written first
+  # (so a global or fully-qualified name wins), then qualified with the
+  # namespace in effect at the declaration. No parent-namespace walk-up.
+  defp resolve_root(schema, nil), do: schema
+
+  defp resolve_root(schema, {name, ns, line}) do
+    candidates = Enum.uniq([name, qualify(name, ns)])
+
+    case Enum.find(candidates, &Map.has_key?(schema.types, &1)) do
+      nil -> throw({:resolve_error, {:unknown_root_type, name, line}})
+      fqn -> %{schema | root_type: fqn}
+    end
   end
 
   # If a table is declared with `foo_type:UnionT; foo:UnionT;` (the
@@ -369,7 +414,12 @@ defmodule Flatbuf.Schema.Resolver do
   end
 
   defp resolve_refs(%Table{} = t, schema) do
-    %{t | fields: Enum.map(t.fields, &resolve_field_ref(&1, t.namespace, schema))}
+    fields =
+      t.fields
+      |> Enum.map(&resolve_field_ref(&1, t.namespace, schema))
+      |> Enum.map(&validate_table_field(&1, t.name, schema))
+
+    %{t | fields: fields}
   end
 
   defp resolve_refs(%SchemaStruct{} = s, schema) do
@@ -380,7 +430,7 @@ defmodule Flatbuf.Schema.Resolver do
         {:scalar, _} -> :ok
         {:enum, _} -> :ok
         {:struct, _} -> :ok
-        {:array, inner, _} -> check_array_inner(s.name, f.name, inner)
+        {:array, inner, n} -> check_array(s.name, Atom.to_string(f.name), inner, n, f.line)
         other -> throw({:resolve_error, {:bad_struct_field_type, s.name, f.name, other}})
       end
     end)
@@ -408,12 +458,194 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp resolve_refs(other, _schema), do: other
 
-  defp check_array_inner(_, _, {:scalar, _}), do: :ok
-  defp check_array_inner(_, _, {:enum, _}), do: :ok
-  defp check_array_inner(_, _, {:struct, _}), do: :ok
+  defp check_array(struct_name, field_name, inner, n, line) do
+    # flatc: "length of fixed-length array must be positive and fit to
+    # uint16_t type".
+    if n < 1 or n > 65_535 do
+      throw({:resolve_error, {:bad_array_length, struct_name, field_name, n, line}})
+    end
 
-  defp check_array_inner(struct_name, field_name, other),
-    do: throw({:resolve_error, {:bad_array_element_type, struct_name, field_name, other}})
+    case inner do
+      {:scalar, _} -> :ok
+      {:enum, _} -> :ok
+      {:struct, _} -> :ok
+      other -> throw({:resolve_error, {:bad_array_element_type, struct_name, field_name, other}})
+    end
+  end
+
+  # Per-field table validation: structural restrictions, `required`
+  # placement, and default-value typing. Returns the field with its
+  # default normalized to the literal shapes codegen understands.
+  defp validate_table_field(f, table_fqn, schema) do
+    check_table_field_type(f, table_fqn)
+
+    if Map.has_key?(f.attributes, :required) and
+         match?({kind, _} when kind in [:scalar, :enum], f.type) do
+      throw({:resolve_error, {:required_on_scalar, table_fqn, fname(f), f.line}})
+    end
+
+    %{f | default: validate_default(f, table_fqn, schema)}
+  end
+
+  defp check_table_field_type(f, table_fqn) do
+    case f.type do
+      {:array, _, _} ->
+        throw({:resolve_error, {:array_in_table, table_fqn, fname(f), f.line}})
+
+      {:vector, {:vector, _}} ->
+        throw({:resolve_error, {:nested_vector, table_fqn, fname(f), f.line}})
+
+      {:vector, {:array, _, _}} ->
+        throw({:resolve_error, {:array_in_table, table_fqn, fname(f), f.line}})
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Default-value typing. Mirrors flatc: scalars and enums take defaults
+  # (range-checked; numeric strings are parsed); strings take string
+  # literals; vectors only `= []`; table/struct/union fields take none.
+  # `= null` (optional) is allowed on scalars and enums only.
+  defp validate_default(%Field{default: nil}, _table, _schema), do: nil
+
+  defp validate_default(%Field{type: {:scalar, :bool}} = f, table, _schema) do
+    case f.default do
+      :null -> :null
+      {:bool, _} = b -> b
+      {:int, n} -> {:bool, n != 0}
+      {:string, "true"} -> {:bool, true}
+      {:string, "false"} -> {:bool, false}
+      {:string, s} -> {:bool, parse_int_string(s, f, table) != 0}
+      other -> throw({:resolve_error, {:invalid_default, table, fname(f), other, f.line}})
+    end
+  end
+
+  defp validate_default(%Field{type: {:scalar, kind}} = f, table, _schema)
+       when kind in [:f32, :f64] do
+    case f.default do
+      :null -> :null
+      {:float, _} = fl -> fl
+      {:int, _} = i -> i
+      {:string, s} -> parse_number_string(s, f, table)
+      other -> throw({:resolve_error, {:invalid_default, table, fname(f), other, f.line}})
+    end
+  end
+
+  defp validate_default(%Field{type: {:scalar, kind}} = f, table, _schema) do
+    case f.default do
+      :null -> :null
+      {:int, n} -> {:int, check_int_range(n, kind, f, table)}
+      {:string, s} -> {:int, check_int_range(parse_int_string(s, f, table), kind, f, table)}
+      other -> throw({:resolve_error, {:invalid_default, table, fname(f), other, f.line}})
+    end
+  end
+
+  defp validate_default(%Field{type: {:enum, fqn}} = f, table, schema) do
+    enum = Schema.fetch(schema, fqn)
+
+    case f.default do
+      :null ->
+        :null
+
+      {:ident, name} ->
+        {:ident, check_enum_member(enum, name, f, table)}
+
+      {:int, n} ->
+        {:int, check_enum_int(enum, n, f, table)}
+
+      {:string, s} ->
+        if Enum.any?(enum.variants, fn {vname, _} -> Atom.to_string(vname) == s end) do
+          {:ident, s}
+        else
+          {:int, check_enum_int(enum, parse_int_string(s, f, table), f, table)}
+        end
+
+      other ->
+        throw({:resolve_error, {:invalid_default, table, fname(f), other, f.line}})
+    end
+  end
+
+  defp validate_default(%Field{type: :string} = f, table, _schema) do
+    case f.default do
+      {:string, _} = s -> s
+      other -> throw({:resolve_error, {:invalid_default, table, fname(f), other, f.line}})
+    end
+  end
+
+  defp validate_default(%Field{type: {:vector, _}} = f, table, _schema) do
+    case f.default do
+      # `= []` is legal (and is what the wire format already means by an
+      # absent vector); non-empty vector defaults are not expressible.
+      {:array, []} = a -> a
+      other -> throw({:resolve_error, {:invalid_default, table, fname(f), other, f.line}})
+    end
+  end
+
+  defp validate_default(%Field{default: default} = f, table, _schema),
+    do: throw({:resolve_error, {:invalid_default, table, fname(f), default, f.line}})
+
+  defp parse_int_string(s, f, table) do
+    case Integer.parse(s) do
+      {n, ""} -> n
+      _ -> throw({:resolve_error, {:invalid_default, table, fname(f), {:string, s}, f.line}})
+    end
+  end
+
+  defp parse_number_string(s, f, table) do
+    case Integer.parse(s) do
+      {n, ""} ->
+        {:int, n}
+
+      _ ->
+        case Float.parse(s) do
+          {fl, ""} -> {:float, fl}
+          _ -> throw({:resolve_error, {:invalid_default, table, fname(f), {:string, s}, f.line}})
+        end
+    end
+  end
+
+  defp check_int_range(n, kind, f, table) do
+    {lo, hi} = scalar_int_range(kind)
+
+    if n < lo or n > hi do
+      throw({:resolve_error, {:default_out_of_range, table, fname(f), n, kind, f.line}})
+    end
+
+    n
+  end
+
+  defp check_enum_member(%SchemaEnum{} = enum, name, f, table) do
+    atom = String.to_atom(name)
+
+    if Enum.any?(enum.variants, fn {vname, _} -> vname == atom end) do
+      name
+    else
+      throw({:resolve_error, {:unknown_enum_default, table, fname(f), name, f.line}})
+    end
+  end
+
+  # For bit_flags enums any value that fits the underlying type is legal
+  # (it's a flag combination); plain enums require an exact member value.
+  defp check_enum_int(%SchemaEnum{bit_flags?: true, underlying_type: u}, n, f, table),
+    do: check_int_range(n, u, f, table)
+
+  defp check_enum_int(%SchemaEnum{variants: variants}, n, f, table) do
+    if Enum.any?(variants, fn {_, v} -> v == n end) do
+      n
+    else
+      throw({:resolve_error, {:enum_default_not_member, table, fname(f), n, f.line}})
+    end
+  end
+
+  defp scalar_int_range(:i8), do: {-128, 127}
+  defp scalar_int_range(:u8), do: {0, 255}
+  defp scalar_int_range(:i16), do: {-32_768, 32_767}
+  defp scalar_int_range(:u16), do: {0, 65_535}
+  defp scalar_int_range(:i32), do: {-2_147_483_648, 2_147_483_647}
+  defp scalar_int_range(:u32), do: {0, 4_294_967_295}
+  defp scalar_int_range(:i64), do: {-9_223_372_036_854_775_808, 9_223_372_036_854_775_807}
+  defp scalar_int_range(:u64), do: {0, 18_446_744_073_709_551_615}
 
   defp resolve_field_ref(%Field{type: type} = f, namespace, schema) do
     %{f | type: resolve_type(type, namespace, schema)}
@@ -473,9 +705,11 @@ defmodule Flatbuf.Schema.Resolver do
   end
 
   defp assign_slots(%Table{fields: fields} = t) do
+    ids = validate_field_ids(t, fields)
+
     {assigned, _} =
       Enum.map_reduce(fields, 4, fn f, slot ->
-        explicit = Map.get(f.attributes, :id)
+        explicit = Map.fetch(ids, f.name)
 
         # The schema's `(id: N)` always refers to a single voffset slot
         # (4 + N*2). For a union field that single slot is the *value*
@@ -484,10 +718,9 @@ defmodule Flatbuf.Schema.Resolver do
         # but the value slot is the higher of the two so the next field
         # starts cleanly at value + 2.
         slot_used =
-          cond do
-            is_integer(explicit) -> 4 + explicit * 2
-            match?({:union, _}, f.type) or match?({:vector, {:union, _}}, f.type) -> slot + 2
-            true -> slot
+          case explicit do
+            {:ok, id} -> 4 + id * 2
+            :error -> if union_field?(f), do: slot + 2, else: slot
           end
 
         next = slot_used + 2
@@ -499,6 +732,97 @@ defmodule Flatbuf.Schema.Resolver do
 
   defp assign_slots(other), do: other
 
+  defp union_field?(f),
+    do: match?({:union, _}, f.type) or match?({:vector, {:union, _}}, f.type)
+
+  # Explicit `(id: N)` validation, mirroring flatc:
+  #
+  #   * ids are non-negative integers (numeric strings are coerced);
+  #   * either all fields carry an id or none do;
+  #   * a union field consumes two ids — the explicit id names the value
+  #     slot, the type slot is id - 1;
+  #   * together the ids must cover 0..max consecutively, each exactly once.
+  #
+  # Returns a `field name => id` map (empty when ids are implicit).
+  defp validate_field_ids(t, fields) do
+    tagged =
+      Enum.map(fields, fn f ->
+        case Map.fetch(f.attributes, :id) do
+          {:ok, raw} -> {f, coerce_field_id(t.name, f, raw)}
+          :error -> {f, nil}
+        end
+      end)
+
+    with_id = Enum.filter(tagged, fn {_, id} -> id != nil end)
+
+    cond do
+      with_id == [] ->
+        %{}
+
+      length(with_id) != length(fields) ->
+        {f, _} = Enum.find(tagged, fn {_, id} -> id == nil end)
+        throw({:resolve_error, {:missing_field_id, t.name, fname(f), f.line}})
+
+      true ->
+        check_id_coverage(t, with_id)
+        Map.new(with_id, fn {f, id} -> {f.name, id} end)
+    end
+  end
+
+  defp coerce_field_id(table, f, raw) do
+    id =
+      case raw do
+        n when is_integer(n) ->
+          n
+
+        s when is_binary(s) ->
+          # flatc parses attribute values as strings; `(id: "0")` is legal.
+          case Integer.parse(s) do
+            {n, ""} -> n
+            _ -> throw({:resolve_error, {:bad_field_id, table, fname(f), raw, f.line}})
+          end
+
+        _ ->
+          throw({:resolve_error, {:bad_field_id, table, fname(f), raw, f.line}})
+      end
+
+    if id < 0 or id > 65_535 do
+      throw({:resolve_error, {:bad_field_id, table, fname(f), raw, f.line}})
+    end
+
+    id
+  end
+
+  defp check_id_coverage(t, with_id) do
+    claimed =
+      Enum.flat_map(with_id, fn {f, id} ->
+        if union_field?(f) do
+          if id < 1 do
+            # flatc: "a union type effectively adds two fields ... its id
+            # must be that of the second field".
+            throw({:resolve_error, {:bad_union_field_id, t.name, fname(f), id, f.line}})
+          end
+
+          [{id - 1, f}, {id, f}]
+        else
+          [{id, f}]
+        end
+      end)
+
+    Enum.reduce(Enum.sort_by(claimed, &elem(&1, 0)), 0, fn {id, f}, expected ->
+      cond do
+        id == expected ->
+          expected + 1
+
+        id < expected ->
+          throw({:resolve_error, {:duplicate_field_id, t.name, fname(f), id, f.line}})
+
+        true ->
+          throw({:resolve_error, {:nonconsecutive_field_ids, t.name, fname(f), id, f.line}})
+      end
+    end)
+  end
+
   defp compute_struct_layout(%SchemaStruct{} = s, schema) do
     {layout, total, max_align} =
       Enum.reduce(s.fields, {[], 0, 1}, fn f, {acc, pos, max_a} ->
@@ -509,12 +833,7 @@ defmodule Flatbuf.Schema.Resolver do
         {[entry | acc], new_pos, max(max_a, align)}
       end)
 
-    forced_align =
-      case Map.get(s.attributes, :force_align) do
-        n when is_integer(n) -> n
-        _ -> 1
-      end
-
+    forced_align = validate_force_align(s, max_align)
     final_align = max(max_align, forced_align)
     final_size = total + pad_to(total, final_align)
 
@@ -522,6 +841,40 @@ defmodule Flatbuf.Schema.Resolver do
   end
 
   defp compute_struct_layout(other, _schema), do: other
+
+  # flatc: force_align on a struct must be a power of two between the
+  # struct's natural alignment and 32. (It accepts numeric strings, and
+  # ignores the attribute entirely on tables and table fields.)
+  defp validate_force_align(s, natural_align) do
+    case Map.fetch(s.attributes, :force_align) do
+      :error ->
+        1
+
+      {:ok, raw} ->
+        n =
+          case raw do
+            n when is_integer(n) ->
+              n
+
+            str when is_binary(str) ->
+              case Integer.parse(str) do
+                {n, ""} -> n
+                _ -> throw({:resolve_error, {:bad_force_align, s.name, raw, natural_align}})
+              end
+
+            _ ->
+              throw({:resolve_error, {:bad_force_align, s.name, raw, natural_align}})
+          end
+
+        if power_of_two?(n) and n >= natural_align and n <= 32 do
+          n
+        else
+          throw({:resolve_error, {:bad_force_align, s.name, n, natural_align}})
+        end
+    end
+  end
+
+  defp power_of_two?(n), do: n > 0 and Bitwise.band(n, n - 1) == 0
 
   defp scalar_or_struct_size_align({:scalar, kind}, _schema) do
     sz = Schema.scalar_size(kind)
@@ -555,8 +908,15 @@ defmodule Flatbuf.Schema.Resolver do
   # values increment from the previous one. For `(bit_flags)` enums the
   # `= N` is interpreted as the *bit position* (so the actual value is
   # `1 <<< N`); missing values still increment the position by one.
+  #
+  # Validation mirrors flatc: every value (explicit or implicit) must fit
+  # the underlying type, values must be unique, and bit_flags positions
+  # must shift to a representable value. flatc 25.x does *not* require
+  # ascending declaration order.
 
-  defp compute_enum_values(variants, false) do
+  defp compute_enum_values(variants, false, fqn, underlying) do
+    {lo, hi} = scalar_int_range(underlying)
+
     {result, _next} =
       Enum.map_reduce(variants, 0, fn v, expected ->
         actual =
@@ -565,14 +925,23 @@ defmodule Flatbuf.Schema.Resolver do
             n -> n
           end
 
+        if actual < lo or actual > hi do
+          throw({:resolve_error, {:enum_value_out_of_range, fqn, v.name, actual, v.line}})
+        end
+
         {{String.to_atom(v.name), actual}, actual + 1}
       end)
 
+    check_unique_enum_values(result, variants, fqn)
     result
   end
 
-  defp compute_enum_values(variants, true) do
+  defp compute_enum_values(variants, true, fqn, underlying) do
     import Bitwise
+
+    # The shifted value (not the bit position) must fit the underlying
+    # type — flatc errors on `byte` shift 7 (128 > 127) but allows 6.
+    {_lo, hi} = scalar_int_range(underlying)
 
     {result, _next} =
       Enum.map_reduce(variants, 0, fn v, expected_shift ->
@@ -582,14 +951,38 @@ defmodule Flatbuf.Schema.Resolver do
             n -> n
           end
 
+        if shift < 0 or 1 <<< shift > hi do
+          throw({:resolve_error, {:bit_flag_out_of_range, fqn, v.name, shift, v.line}})
+        end
+
         value = 1 <<< shift
         {{String.to_atom(v.name), value}, shift + 1}
       end)
 
+    check_unique_enum_values(result, variants, fqn)
     result
   end
 
+  defp check_unique_enum_values(computed, variants, fqn) do
+    lines = Map.new(variants, fn v -> {String.to_atom(v.name), v.line} end)
+
+    Enum.reduce(computed, %{}, fn {name, value}, seen ->
+      case Map.fetch(seen, value) do
+        {:ok, _first} ->
+          throw(
+            {:resolve_error,
+             {:duplicate_enum_value, fqn, Atom.to_string(name), value, Map.get(lines, name)}}
+          )
+
+        :error ->
+          Map.put(seen, value, name)
+      end
+    end)
+  end
+
   # Misc helpers ----------------------------------------------------------
+
+  defp fname(%Field{name: name}), do: Atom.to_string(name)
 
   defp qualify(name, nil), do: name
 

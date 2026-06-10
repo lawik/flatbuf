@@ -75,6 +75,11 @@ defmodule Flatbuf.Schema.Lexer do
     end
   end
 
+  # Float with no integer part: `.5` (must precede the `.` punct clause)
+  defp do_tokenize(<<?., c, _::binary>> = bin, line, acc) when c in ?0..?9 do
+    tokenize_number(bin, line, acc)
+  end
+
   # Punctuation
   for {ch, tok} <- [
         {"{", :lbrace},
@@ -97,19 +102,7 @@ defmodule Flatbuf.Schema.Lexer do
 
   # Numbers
   defp do_tokenize(<<c, _::binary>> = bin, line, acc) when c in ?0..?9 do
-    case read_number(bin) do
-      {:ok, tok_value, rest} ->
-        tok =
-          case tok_value do
-            {:int, v} -> {:int, v, line}
-            {:float, v} -> {:float, v, line}
-          end
-
-        do_tokenize(rest, line, [tok | acc])
-
-      {:error, _} = err ->
-        err
-    end
+    tokenize_number(bin, line, acc)
   end
 
   # Identifier / keyword
@@ -129,6 +122,20 @@ defmodule Flatbuf.Schema.Lexer do
 
   defp do_tokenize(<<c::utf8, _::binary>>, line, _acc) do
     {:error, {:unexpected_char, <<c::utf8>>, line}}
+  end
+
+  # Any byte that isn't valid UTF-8 (e.g. a Latin-1 file) — error tuple,
+  # never a FunctionClauseError.
+  defp do_tokenize(<<byte, _::binary>>, line, _acc) do
+    {:error, {:invalid_byte, byte, line}}
+  end
+
+  defp tokenize_number(bin, line, acc) do
+    case read_number(bin) do
+      {:ok, {:int, v}, rest} -> do_tokenize(rest, line, [{:int, v, line} | acc])
+      {:ok, {:float, v}, rest} -> do_tokenize(rest, line, [{:float, v, line} | acc])
+      {:error, {:bad_number, text}} -> {:error, {:bad_number, text, line}}
+    end
   end
 
   # Helpers ----------------------------------------------------------------
@@ -163,18 +170,32 @@ defmodule Flatbuf.Schema.Lexer do
 
   defp read_string("", line, _term, _acc), do: {:error, {:unterminated_string, line}}
 
-  defp read_string(<<c, rest::binary>>, line, term, acc) when c == term,
-    do: {:ok, IO.iodata_to_binary(Enum.reverse(acc)), line, rest}
+  defp read_string(<<c, rest::binary>>, line, term, acc) when c == term do
+    str = IO.iodata_to_binary(Enum.reverse(acc))
+
+    # `\xHH` injects raw bytes, so validate the assembled string as a
+    # whole — flatc rejects string literals that aren't valid UTF-8.
+    if String.valid?(str) do
+      {:ok, str, line, rest}
+    else
+      {:error, {:illegal_utf8_in_string, line}}
+    end
+  end
 
   defp read_string(<<"\\", rest::binary>>, line, term, acc) do
     case rest do
       <<?n, r::binary>> -> read_string(r, line, term, [?\n | acc])
       <<?t, r::binary>> -> read_string(r, line, term, [?\t | acc])
       <<?r, r::binary>> -> read_string(r, line, term, [?\r | acc])
+      <<?b, r::binary>> -> read_string(r, line, term, [?\b | acc])
+      <<?f, r::binary>> -> read_string(r, line, term, [?\f | acc])
       <<?\\, r::binary>> -> read_string(r, line, term, [?\\ | acc])
+      <<?/, r::binary>> -> read_string(r, line, term, [?/ | acc])
       <<?", r::binary>> -> read_string(r, line, term, [?" | acc])
       <<?', r::binary>> -> read_string(r, line, term, [?' | acc])
       <<?0, r::binary>> -> read_string(r, line, term, [0 | acc])
+      <<?x, r::binary>> -> read_hex_escape(r, line, term, acc)
+      <<?u, r::binary>> -> read_unicode_escape(r, line, term, acc)
       <<c, _::binary>> -> {:error, {:bad_escape, <<c>>, line}}
       "" -> {:error, {:unterminated_string, line}}
     end
@@ -185,6 +206,61 @@ defmodule Flatbuf.Schema.Lexer do
 
   defp read_string(<<c::utf8, rest::binary>>, line, term, acc),
     do: read_string(rest, line, term, [<<c::utf8>> | acc])
+
+  defp read_string(<<_byte, _::binary>>, line, _term, _acc),
+    do: {:error, {:illegal_utf8_in_string, line}}
+
+  # `\xHH` — exactly two hex digits, yielding one raw byte (flatc semantics;
+  # multi-byte UTF-8 sequences can be spelled as consecutive escapes).
+  defp read_hex_escape(<<h1, h2, rest::binary>>, line, term, acc)
+       when (h1 in ?0..?9 or h1 in ?a..?f or h1 in ?A..?F) and
+              (h2 in ?0..?9 or h2 in ?a..?f or h2 in ?A..?F) do
+    byte = String.to_integer(<<h1, h2>>, 16)
+    read_string(rest, line, term, [byte | acc])
+  end
+
+  defp read_hex_escape(_rest, line, _term, _acc),
+    do: {:error, {:bad_hex_escape, line}}
+
+  # `\uXXXX` — exactly four hex digits; UTF-16 surrogate pairs combine.
+  defp read_unicode_escape(rest, line, term, acc) do
+    case take_u16(rest) do
+      {:ok, cp, rest2} when cp in 0xD800..0xDBFF ->
+        case rest2 do
+          <<"\\u", more::binary>> ->
+            case take_u16(more) do
+              {:ok, lo, rest3} when lo in 0xDC00..0xDFFF ->
+                combined = 0x10000 + Bitwise.bsl(cp - 0xD800, 10) + (lo - 0xDC00)
+                read_string(rest3, line, term, [<<combined::utf8>> | acc])
+
+              _ ->
+                {:error, {:unpaired_surrogate, line}}
+            end
+
+          _ ->
+            {:error, {:unpaired_surrogate, line}}
+        end
+
+      {:ok, cp, _rest2} when cp in 0xDC00..0xDFFF ->
+        {:error, {:unpaired_surrogate, line}}
+
+      {:ok, cp, rest2} ->
+        read_string(rest2, line, term, [<<cp::utf8>> | acc])
+
+      :error ->
+        {:error, {:bad_unicode_escape, line}}
+    end
+  end
+
+  defp take_u16(<<h1, h2, h3, h4, rest::binary>>)
+       when (h1 in ?0..?9 or h1 in ?a..?f or h1 in ?A..?F) and
+              (h2 in ?0..?9 or h2 in ?a..?f or h2 in ?A..?F) and
+              (h3 in ?0..?9 or h3 in ?a..?f or h3 in ?A..?F) and
+              (h4 in ?0..?9 or h4 in ?a..?f or h4 in ?A..?F) do
+    {:ok, String.to_integer(<<h1, h2, h3, h4>>, 16), rest}
+  end
+
+  defp take_u16(_), do: :error
 
   defp read_ident(<<c, rest::binary>>, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c == ?_,
@@ -212,34 +288,27 @@ defmodule Flatbuf.Schema.Lexer do
     end
   end
 
+  # `.5` — fraction with no integer part (flatc accepts it).
+  defp read_number(<<".", rest::binary>>) do
+    {frac, rest2} = take_digits(rest, [])
+    {exp_part, rest3} = take_exponent(rest2)
+    parse_float("0." <> frac <> exp_part, rest3)
+  end
+
   defp read_number(bin) do
     {digits, rest} = take_digits(bin, [])
 
     case rest do
-      <<".", more::binary>> when more != "" ->
-        case more do
-          <<c, _::binary>> when c in ?0..?9 ->
-            {frac, rest2} = take_digits(more, [])
-            {exp_part, rest3} = take_exponent(rest2)
-            text = digits <> "." <> frac <> exp_part
-
-            case Float.parse(text) do
-              {f, ""} -> {:ok, {:float, f}, rest3}
-              _ -> {:error, {:bad_number, text}}
-            end
-
-          _ ->
-            int_with_exponent(digits, rest)
-        end
+      # `1.5`, `1.` and `1.e2` are all floats (flatc accepts the bare dot).
+      <<".", more::binary>> ->
+        {frac, rest2} = take_digits(more, [])
+        {exp_part, rest3} = take_exponent(rest2)
+        frac = if frac == "", do: "0", else: frac
+        parse_float(digits <> "." <> frac <> exp_part, rest3)
 
       <<c, _::binary>> when c in [?e, ?E] ->
         {exp_part, rest2} = take_exponent(rest)
-        text = digits <> exp_part
-
-        case Float.parse(text) do
-          {f, ""} -> {:ok, {:float, f}, rest2}
-          _ -> {:error, {:bad_number, text}}
-        end
+        parse_float(digits <> exp_part, rest2)
 
       _ ->
         case Integer.parse(digits) do
@@ -249,10 +318,10 @@ defmodule Flatbuf.Schema.Lexer do
     end
   end
 
-  defp int_with_exponent(digits, rest) do
-    case Integer.parse(digits) do
-      {n, ""} -> {:ok, {:int, n}, rest}
-      _ -> {:error, {:bad_number, digits}}
+  defp parse_float(text, rest) do
+    case Float.parse(text) do
+      {f, ""} -> {:ok, {:float, f}, rest}
+      _ -> {:error, {:bad_number, text}}
     end
   end
 
