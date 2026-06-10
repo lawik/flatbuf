@@ -608,7 +608,10 @@ defmodule Flatbuf.Codegen.Wire do
 
     @doc """
     Build a vector of uoffsets (already-written sub-objects: strings,
-    tables). `addrs` is a list of addresses in source order.
+    tables). `addrs` is a list of addresses in source order. A `nil`
+    address is a NONE element in a vector of unions: its slot stores
+    uoffset 0, and readers honor the parallel type vector's 0
+    discriminator instead of following the offset.
     """
     def create_offset_vector(b, addrs) do
       count = length(addrs)
@@ -620,7 +623,7 @@ defmodule Flatbuf.Codegen.Wire do
         |> Enum.reverse()
         |> Enum.reduce(b, fn addr, acc ->
           acc = align(acc, 4)
-          uoff = acc.size + 4 - addr
+          uoff = if addr == nil, do: 0, else: acc.size + 4 - addr
           push_raw(acc, <<uoff::little-32>>)
         end)
 

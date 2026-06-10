@@ -426,7 +426,10 @@ defmodule Flatbuf.Codegen.Table do
       {:vector, {:union, fqn}} ->
         # Vectors of unions are stored as two parallel vectors in the
         # vtable: a `[u8]` of discriminators at `vtable_slot - 2` and
-        # a `[uoffset]` of variant values at `vtable_slot`.
+        # a `[uoffset]` of variant values at `vtable_slot`. A NONE
+        # (discriminator 0) element decodes to nil without touching
+        # its value slot — flatc's verifier deliberately leaves that
+        # slot uninspected, so its bytes are not to be trusted.
         disc_slot = f.vtable_slot - 2
 
         """
@@ -443,10 +446,15 @@ defmodule Flatbuf.Codegen.Table do
                         []
                       else
                         for i <- 0..(count - 1) do
-                          disc = Wire.read_u8(buf, Wire.vector_elem_pos(types_abs, i, 1))
-                          elem_pos = Wire.vector_elem_pos(values_abs, i, 4)
-                          abs_pos = Wire.follow_uoffset(buf, elem_pos)
-                          #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                          case Wire.read_u8(buf, Wire.vector_elem_pos(types_abs, i, 1)) do
+                            0 ->
+                              nil
+
+                            disc ->
+                              elem_pos = Wire.vector_elem_pos(values_abs, i, 4)
+                              abs_pos = Wire.follow_uoffset(buf, elem_pos)
+                              #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                          end
                         end
                       end
                   end
