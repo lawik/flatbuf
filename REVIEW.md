@@ -7,12 +7,16 @@
 > escape gaps, `root_type` lookup, `:nstandard` packaging, niceties
 > validation, manifest robustness, fresh-clone-green tests, CI
 > workflows, the encode-direction oracle suite, and the SPEC/README/
-> CHANGELOG drift. Full suite: 365 tests / 0 failures (264 offline);
-> all gates clean. Still open (tracked in QUALITY.md): property-based
-> tests, verifier error paths/configurable depth + alignment checks
-> (documented deviation), 3 pinned upstream fixtures
-> (alignment_test / evolution_v1 / test_64bit), union underlying
-> types, dedicated `deprecated`/`file_extension` tests, `elixir:
+> CHANGELOG drift. A third round the same day closed the remaining
+> open items: property-based tests, verifier error paths +
+> configurable depth, union underlying types, the `alignment_test`
+> pin (harness bug), deprecated-field semantics (including an encode
+> fix), `file_extension/0`, and the codegen maintainability items.
+> Full suite: 424 tests + 12 properties / 0 failures (323 + 12
+> offline); all gates clean. Still open (tracked in QUALITY.md):
+> 64-bit offsets (`test_64bit` stays pinned, scope estimated),
+> `evolution_v1` (pinned — flatc segfaults on its own buffer; not
+> ours to fix), the longer-term AST-codegen idea, and `elixir:
 > "~> 1.19"` kept deliberately (formatter-version stability for
 > `flatbuf.gen.check`). The text below is the unedited point-in-time
 > review.

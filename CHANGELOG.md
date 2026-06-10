@@ -4,6 +4,20 @@
 
 ### Added
 
+- Union underlying types: `union U : int32 { ... }` (any integral
+  scalar or a previously declared enum). Discriminators are read and
+  written at the underlying type's full width, matching what `flatc`'s
+  generated C++/TS code does on the wire. Note that `flatc`'s own JSON
+  tooling does not implement the feature (it refuses such schemas for
+  `--json` and mis-writes 1-byte discriminators for `--binary`), so
+  text-level interop with `flatc` is not possible for these schemas.
+- Property-based round-trip tests (StreamData): generators derived
+  from the schema IR produce arbitrary valid values and round-trip
+  them through encode/decode/verify and through `flatc` (SPEC §10.4).
+- Generated root tables expose `file_extension/0` when the schema
+  declares `file_extension`, parallel to `file_identifier/0`.
+- `verify/2` and `verify_size_prefixed/2` accept `max_depth:`
+  (default 64) to bound recursion into nested tables.
 - Encode-direction differential suite: buffers produced by the
   generated encoders are now verified against `flatc` across the
   feature matrix (scalars, strings, vectors, structs, fixed arrays,
@@ -53,6 +67,21 @@
 
 ### Changed
 
+- **Breaking (generated code):** verifier errors are now three-element
+  tuples `{:error, reason, path}` where `path` is a root-first list of
+  field atoms, vector indices, and union variant atoms locating the
+  failure (e.g. `[:inventory, 3, :name]`); buffer-level failures carry
+  `[]`. Reasons keep their tagged shapes; field identity that the path
+  now carries was dropped from `:union_vector_*` reasons. Regenerate
+  committed output and update any `{:error, _}` matches on `verify`
+  results.
+- Deprecated fields are skipped on encode (their vtable slots stay
+  reserved), matching `flatc`'s generated builders — previously they
+  were written. Decode still surfaces a deprecated field's value when
+  a buffer contains it; `to_json/1` omits deprecated fields.
+- Codegen threads the namespace override explicitly instead of via
+  the process dictionary, and the wire template uses a validating
+  multi-hole fill (internal; emitted sources are byte-identical).
 - `Flatbuf.Codegen.generate/2` accepts a `:niceties` option.
 - The generated `encode/1` now catches the required-field throw and
   returns it as a tagged error tuple instead of crashing the caller.
@@ -68,6 +97,13 @@
 
 ### Fixed
 
+- The `alignment_test` upstream fixture round-trips: the harness had
+  been pairing the binary with a stale orphaned JSON from an older
+  schema revision. The two remaining pinned fixtures are annotated
+  with one-line reasons (`evolution_v1`: `flatc` segfaults generating
+  text for its own buffer; `test_64bit`: 64-bit offsets unsupported
+  and `flatc` has no JSON oracle for them), and recorded errors no
+  longer embed machine-specific paths.
 - Scalar values are validated on the encode path. Out-of-range or
   wrong-typed values used to be silently truncated into the wire
   (`encode(%{a: 70_000})` on a `ushort` produced `4464`); they now

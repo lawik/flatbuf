@@ -59,8 +59,10 @@ flatbuf.gen.check` is the CI gate. `mix help flatbuf.gen` has the flags.
 - 64-bit offsets / `(vector64)` — parsed but encoded as 32-bit.
 - `force_align` on tables — ignored (as `flatc` does); honored on
   structs and vectors.
-- Union underlying types (`union U : int32 { ... }`) — not supported,
-  parse error.
+- Union underlying types (`union U : int32 { ... }`) — supported with
+  full-width discriminators (what `flatc`'s generated code does), but
+  `flatc`'s own JSON tooling doesn't implement the feature, so no
+  text-level interop for such schemas.
 - `rpc_service` — parsed, no client/server codegen.
 - `to_json/1` f32 strings — same bits as flatc, longer decimals.
 - FNV-64 hashes follow the spec but aren't differentially tested against flatc.

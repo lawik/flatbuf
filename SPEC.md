@@ -146,7 +146,7 @@ Productions:
 - `table Name { field_decl* }` — fields with optional defaults and attribute lists.
 - `struct Name { field_decl* }` — same syntax, restricted semantics (no defaults, no scalars-only-and-structs).
 - `enum Name : underlying_type { ident (= int)? (, ident (= int)?)* }`.
-- `union Name { TypeRef (, TypeRef)* }` — variants may be table types, struct types (post-1.12), or `string` (post-1.12).
+- `union Name (: underlying_type)? { TypeRef (= int)? (, TypeRef (= int)?)* }` — variants may be table types, struct types (post-1.12), or `string` (post-1.12); the optional underlying type (an integral scalar or declared enum) widens the discriminator.
 - `field_decl : type (= default)? (attribute_list)? ;`.
 - Type references: scalars, `string`, `[T]` (vector of T), user-defined name (resolved later), `[T]:N` (fixed-size array, struct-fields only).
 - Attribute list: `( name (: value)? (, ...)* )`.
@@ -164,7 +164,7 @@ Walks the CST and produces a normalized `%Flatbuf.Schema{}`. Responsibilities:
 - **Vtable slot assignment.** Default slot order is declaration order (slot 4, 6, 8, ... — voffset_t aligned). Explicit `(id: N)` attributes override; we validate that explicit ids are contiguous and non-conflicting.
 - **Default value typing.** A `= 100` on a `short` field is typed as i16; on a `float` field as f32; on an enum field as a variant. Validation of representability.
 - **Enum value computation.** Implicit increment from previous, hex literal support, `bit_flags` attribute mode (powers of two).
-- **Union variant tagging.** Each variant gets a `u8` discriminator (1..255; 0 is `NONE`). Union fields in tables expand into two vtable slots: the type byte and the value offset.
+- **Union variant tagging.** Each variant gets a discriminator (0 is `NONE`); the default discriminator type is `u8` (1..255 variants), and an explicit underlying type (`union U : int32`) widens it — discriminators are read/written at the underlying type's full width, matching `flatc`'s generated-code contract. Union fields in tables expand into two vtable slots: the type scalar and the value offset.
 - **Attribute validation.** Semantically load-bearing attributes are validated: `id` (all-or-none, consecutive, unions take two), `required` (rejected on scalars), `force_align` (power of two, within bounds), `bit_flags` (shift range), `hash`, `key`, `shared`, `nested_flatbuffer`, `deprecated`. Language-binding attributes (`native_*`, `cpp_*`, `csharp_partial`, `private`, `streaming`, `idempotent`, ...) and user-declared attributes are passed through unchecked.
 - **Struct layout.** Compute field offsets and total size with the FlatBuffers alignment rules (each field aligned to its natural size; struct aligned to its largest member; `force_align` overrides).
 - **Root type, file identifier, file extension.** Stored on the schema record.
@@ -222,12 +222,12 @@ Generated alongside the reader. For each table, walks every field that has an of
 2. For vectors: the length is sane (`length * elem_size + 4 <= buffer_end - vec_offset`).
 3. For strings: the null terminator is present after the length-counted bytes, and the byte slice is within bounds.
 4. For unions: the discriminator selects a variant we know, and the variant's offset is verified per its type. Vector-of-union fields must have both parallel vectors present with equal element counts.
-5. For sub-tables: recurse, with a depth limit (64). uoffsets are forward-only on this wire, so true cycles cannot occur; the depth limit bounds recursion on adversarial chains.
+5. For sub-tables: recurse, with a depth limit (`max_depth:` option on `verify/2`, default 64). uoffsets are forward-only on this wire, so true cycles cannot occur; the depth limit bounds recursion on adversarial chains.
 6. For `required` fields: the vtable slot is non-zero.
 
 Deliberate deviation: the verifier does not alignment-check targets. Misaligned reads are safe on the BEAM (no faults, no UB); a buffer we accept could in principle be rejected by a stricter C++ verifier, but nothing we *emit* is misaligned.
 
-Verifier errors are returned as flat tagged tuples, e.g. `{:error, {:inline_field_out_of_bounds, voffset, len, inline_size}}`. (A path to the failing field, e.g. `[:monster, :inventory, 3]`, is a future refinement.)
+Verifier errors are `{:error, reason, path}` where `reason` is a tagged tuple, e.g. `{:inline_field_out_of_bounds, voffset, len, inline_size}`, and `path` is a root-first list of field atoms, vector indices, and union variant atoms locating the failure, e.g. `[:inventory, 3, :name]` (buffer-level failures carry `[]`).
 
 ### 6.6 Object API (decode/encode of structs)
 
@@ -293,6 +293,7 @@ Every row here is in scope. The "Phase" column orders implementation work — se
 |---|---|
 | Tables, structs, enums | 1 |
 | Unions | 2 |
+| Union underlying types (`union U : int32`) | 3 |
 | `namespace` declarations | 1 |
 | `include "path";` with recursive resolution | 1 |
 | `root_type` declaration | 1 |
@@ -394,7 +395,7 @@ The library is correct iff `flatc` says it is. Concretely:
    - Elixir encode → `flatc --json --raw-binary` → compare JSON to the source (the encode-oracle suite spans the feature matrix: scalars, strings, vectors, structs, fixed arrays, enums/bit_flags, unions incl. vectors, nesting, file identifiers, size prefixes, key sorting, shared strings, force_align).
    - `flatc --binary` → Elixir decode → compare against the source JSON (the fixture round-trip suite over the upstream corpus, including buffers produced by other language ports).
 3. **Byte-exact comparison is opt-in only.** Vtable layout and string interning are implementation-defined. Default to semantic (JSON-level) comparison; mark byte-exact tests explicitly when the layout is deterministic.
-4. **Property-based tests.** *Planned, not yet implemented.* StreamData generators driven by the schema IR — given a schema, produce arbitrary valid data, then round-trip through every direction. Catches encoder/decoder asymmetry beyond the hand-picked oracle cases.
+4. **Property-based tests.** StreamData generators driven by the schema IR — given a resolved schema, produce arbitrary valid value maps (full scalar ranges, unions, vectors, optionals) and round-trip them: encode→decode equality against a predicted result, encode→verify, encode→`flatc --json`, and `flatc --binary`→decode. Catches encoder/decoder asymmetry beyond the hand-picked oracle cases.
 5. **Reflection self-test.** Parse `reflection.fbs` with our parser, generate Elixir for it, then have our parser parse `monster_test.fbs`, emit a `reflection.fbs`-shaped binary using our generated `reflection.fbs` codec, and ask our generated codec to decode it. Closes the loop on both parser and codegen.
 6. **Verifier fuzz.** Custom corpus — truncated buffers, oob offsets, oversized lengths, byte flips, vtables claiming sizes past buffer end. Every input must return `:ok` or an error tuple, never crash or read OOB (asserted with plain rescue/catch around `verify/1`).
 7. **Codegen drift.** `mix flatbuf.gen.check` fails CI when regenerating committed output would change it, and a formatter-idempotency test pins the emitted style. (Golden-file snapshots of generated source remain a possible addition.)

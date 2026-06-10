@@ -1,8 +1,9 @@
 # Code quality review
 
 Originally a snapshot from a review on 2026-05-14; a second, deeper
-review on 2026-06-09 produced [`REVIEW.md`](REVIEW.md), and the fixes
-landed 2026-06-10. All gates are green:
+review on 2026-06-09 produced [`REVIEW.md`](REVIEW.md), fixes landed
+2026-06-10, and the remaining open items were worked through the same
+day (round 3). All gates are green:
 
 | Check | Status |
 |---|---|
@@ -10,11 +11,36 @@ landed 2026-06-10. All gates are green:
 | `mix format --check-formatted` | clean |
 | `mix credo --strict` | clean (see note on exclusions below) |
 | `mix dialyzer` | clean |
-| `mix test` (full corpus + flatc) | 365 pass, 0 fail |
-| `mix test` (fresh clone, offline) | 264 pass, 0 fail, 13 skipped with notice |
+| `mix test` (full corpus + flatc) | 424 tests + 12 properties, 0 fail |
+| `mix test` (fresh clone, offline) | 323 tests + 12 properties, 0 fail, 13 skipped with notice |
 
 CI (`.github/workflows/ci.yml`) runs lint, the offline profile, the
 full-corpus profile, and dialyzer.
+
+## Round 3 punch list (resolved)
+
+- [x] Property-based round-trip tests: IR-driven StreamData generators
+  over kitchen-sink/union/struct schemas, four directions including
+  `flatc` (SPEC §10.4 implemented).
+- [x] Verifier errors carry a root-first path to the failing field
+  (`{:error, reason, path}`), and `verify/2` takes `max_depth:`
+  (default 64). Breaking change for generated code, recorded in the
+  CHANGELOG.
+- [x] Union underlying types (`union U : int32`) implemented with
+  full-width discriminators — probed against `flatc`'s generated-code
+  contract; its JSON tooling doesn't support the feature at all.
+- [x] `alignment_test` fixture un-pinned (the harness paired a stale
+  orphaned upstream JSON); the two remaining pins carry one-line
+  reasons and no machine-specific noise.
+- [x] `deprecated` fields: dedicated suite, and a real fix — encode
+  now skips deprecated fields (slots stay reserved) instead of
+  writing them.
+- [x] `file_extension/0` emitted on root tables, mirroring
+  `file_identifier/0`, with tests.
+- [x] `Process.put` namespace threading replaced by explicit argument
+  threading (emitted sources verified byte-identical).
+- [x] Wire template filled via a validating multi-hole substitution
+  that raises on missing or leftover placeholders.
 
 ## Round 2 punch list (resolved — details in REVIEW.md and CHANGELOG)
 
@@ -73,22 +99,23 @@ full-corpus profile, and dialyzer.
 - **`mix flatbuf.gen` is manifest-free** — stale-output cleanup is the
   compiler's job; documented in SPEC §5.1 instead of duplicating the
   manifest machinery.
+- **`evolution_v1` stays pinned** — `flatc`'s lax JSON parser writes a
+  union value with a NONE discriminator and then segfaults trying to
+  textify its own buffer; there is no reference output in any `flatc`
+  mode, so no faithful coverage is possible. Reason recorded in the
+  manifest.
 
 ## Still open (optional, low priority)
 
-- [ ] Property-based round-trip tests (StreamData) — SPEC §10.4.
-- [ ] Verifier errors carry no path to the failing field (flat tagged
-  tuples); depth limit is fixed at 64.
-- [ ] Three upstream fixtures remain pinned as expected failures
-  (`alignment_test`, `evolution_v1`, `test_64bit`) — 64-bit offsets
-  and flatc JSON-layer gaps; see `test/fixtures/fixture_manifest.exs`.
-- [ ] Union underlying types (`union U : int32 {}`) unsupported.
-- [ ] `deprecated` fields and `file_extension` have only incidental
-  test coverage.
-- [ ] `Process.put`-based namespace threading in
-  `lib/flatbuf/codegen/{table,struct,union}.ex` — works, but a
-  threaded `%State{}` or closure would be cleaner.
-- [ ] `lib/flatbuf/codegen/wire.ex` fills its template with a single
-  `String.replace` — fine for one hole, fragile if more get added.
+- [ ] 64-bit offsets / `(vector64)` encoding (`test_64bit` fixture
+  stays pinned). Diagnosed scope: attribute plumbing in the schema
+  front-end, u64 reads in wire/table decode + verify, and the big
+  piece — FlatBufferBuilder64 semantics (64-bit region written before
+  the 32-bit space) on the encode side; roughly 600–900 LOC, plus
+  binary-level test support because `flatc` has no JSON oracle for
+  64-bit buffers. Not to be started casually.
 - [ ] Longer-term: build generated code as AST + `Macro.to_string/1`
-  instead of string templates + post-hoc formatting.
+  instead of string templates + post-hoc formatting. The string
+  pipeline is now stable (formatter idempotency + byte-identity
+  harness + oracle suites pin it), so this is an architectural
+  preference, not a defect.
