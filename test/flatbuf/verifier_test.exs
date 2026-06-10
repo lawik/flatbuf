@@ -1,12 +1,17 @@
 defmodule Flatbuf.VerifierTest do
   @moduledoc """
-  Exercises the generated `verify/1` against well-formed and malformed
+  Exercises the generated `verify/2` against well-formed and malformed
   buffers.
 
   The verifier's job is to refuse cleanly — it must never let a bad
   offset propagate to the reader where it would crash with a binary_part
   badarg or trigger unbounded recursion. Each test here checks one
   way a buffer can be malformed.
+
+  Errors are `{:error, reason, path}` where `path` is a root-first
+  list of field atoms, vector indices, and union variant atoms
+  locating the failing field (empty for failures before any field is
+  reached). `Flatbuf.VerifierPathTest` pins that contract in detail.
   """
 
   use ExUnit.Case, async: false
@@ -34,26 +39,26 @@ defmodule Flatbuf.VerifierTest do
     assert :ok = VerifyT.Outer.verify(bin)
   end
 
-  test "a buffer too small for the root uoffset is rejected" do
-    assert {:error, _} = VerifyT.Outer.verify(<<>>)
-    assert {:error, _} = VerifyT.Outer.verify(<<1, 2, 3>>)
+  test "a buffer too small for the root uoffset is rejected with empty path" do
+    assert {:error, {:buffer_too_small, 4}, []} = VerifyT.Outer.verify(<<>>)
+    assert {:error, {:buffer_too_small, 4}, []} = VerifyT.Outer.verify(<<1, 2, 3>>)
   end
 
   test "truncating the buffer mid-table is caught" do
     {:ok, bin} = VerifyT.Outer.encode(%{name: "hello", inner: %{value: 7}})
 
     truncated = binary_part(bin, 0, byte_size(bin) - 4)
-    assert {:error, _} = VerifyT.Outer.verify(truncated)
+    assert {:error, _, _} = VerifyT.Outer.verify(truncated)
   end
 
-  test "an obviously bogus root pointer is rejected" do
+  test "an obviously bogus root pointer is rejected with empty path" do
     # Root uoffset that points way past end-of-buffer.
     junk = <<0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0>>
-    assert {:error, _} = VerifyT.Outer.verify(junk)
+    assert {:error, {:bad_uoffset, 0, _}, []} = VerifyT.Outer.verify(junk)
   end
 
   test "an empty buffer fails verify" do
-    assert {:error, _} = VerifyT.Outer.verify(<<>>)
+    assert {:error, _, []} = VerifyT.Outer.verify(<<>>)
   end
 
   @required_schema """
@@ -89,12 +94,12 @@ defmodule Flatbuf.VerifierTest do
     wire_module: Flatbuf.VerifierTest.WireReqRelaxed
   )
 
-  test "verify rejects a buffer that omits a required field" do
+  test "verify rejects a buffer that omits a required field, path names the field" do
     # Encode through a schema that lacks the `(required)` flag, then ask
     # the required-aware codec to verify the resulting buffer: it should
     # surface the missing slot as a structural error.
     {:ok, bin} = VerifyReqRelaxed.Doc.encode(%{body: "no title"})
-    assert {:error, {:missing_required, :title}} = VerifyReq.Doc.verify(bin)
+    assert {:error, {:missing_required, :title}, [:title]} = VerifyReq.Doc.verify(bin)
   end
 
   @file_id_schema """
@@ -124,10 +129,12 @@ defmodule Flatbuf.VerifierTest do
   end
 
   test "verify_size_prefixed rejects a mismatched length" do
-    assert {:error, {:buffer_too_small, _}} = VerifyFid.Doc.verify_size_prefixed(<<>>)
+    assert {:error, {:buffer_too_small, _}, []} = VerifyFid.Doc.verify_size_prefixed(<<>>)
     {:ok, bin} = VerifyFid.Doc.encode_size_prefixed(%{value: 1})
     truncated = binary_part(bin, 0, byte_size(bin) - 2)
-    assert {:error, _} = VerifyFid.Doc.verify_size_prefixed(truncated)
+
+    assert {:error, {:size_prefix_mismatch, _, _}, []} =
+             VerifyFid.Doc.verify_size_prefixed(truncated)
   end
 
   test "decode_size_prefixed rejects a truncated buffer" do

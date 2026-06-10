@@ -365,6 +365,19 @@ defmodule Flatbuf.Codegen.Wire do
     end
 
     @doc """
+    Prepend a path segment (field atom, vector index, or union variant
+    atom) onto a verifier result. `:ok` passes through untouched, so
+    the success path allocates nothing. A 2-tuple error from one of the
+    verify primitives gains a fresh single-segment path; a 3-tuple
+    error from a nested `__verify_at__`/`__verify_variant__` call gets
+    the segment prepended. Paths build up root-first as the error
+    unwinds back to `verify/2`.
+    """
+    def verify_path(:ok, _seg), do: :ok
+    def verify_path({:error, reason}, seg), do: {:error, reason, [seg]}
+    def verify_path({:error, reason, path}, seg), do: {:error, reason, [seg | path]}
+
+    @doc """
     Check that an inline field at table-relative voffset `off` spanning
     `len` bytes fits inside the table's inline area. The vtable's
     per-slot voffsets are attacker-controlled, so every present inline

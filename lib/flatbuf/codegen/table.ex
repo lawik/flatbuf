@@ -34,7 +34,7 @@ defmodule Flatbuf.Codegen.Table do
   defp do_generate(%Table{} = t, %Schema{} = schema, opts) do
     wire_module = Keyword.fetch!(opts, :wire_module)
     # Every table can serve as the root of a (possibly nested) buffer,
-    # so we always emit `decode/1`, `encode/1`, `verify/1`,
+    # so we always emit `decode/1`, `encode/1`, `verify/2`,
     # `to_json/1`, and `from_json/1`. The schema's `root_type`
     # declaration is a hint about the canonical root; it doesn't
     # restrict which tables can act as roots.
@@ -106,11 +106,15 @@ defmodule Flatbuf.Codegen.Table do
       end
     #{verify_top}
       @doc false
-      def __verify_at__(_buf, _pos, 0), do: {:error, :depth_exceeded}
+      def __verify_at__(_buf, _pos, 0), do: {:error, :depth_exceeded, []}
 
       def __verify_at__(buf, pos, #{if recurses?(t), do: "depth", else: "_depth"}) do
-        with {:ok, _vt_pos, _vt_size, #{inline_size_param}} <- Wire.verify_table_header(buf, pos) do
-    #{verify_body}    end
+        case Wire.verify_table_header(buf, pos) do
+          {:ok, _vt_pos, _vt_size, #{inline_size_param}} ->
+    #{verify_body}
+          {:error, reason} ->
+            {:error, reason, []}
+        end
       end
 
     #{accessor_funs}end
@@ -576,7 +580,7 @@ defmodule Flatbuf.Codegen.Table do
       Returns `{:ok, t()}` on success or `{:error, {:malformed_buffer, exception}}`
       if the buffer is truncated or has out-of-range offsets. Other
       exceptions (programmer bugs in the caller, etc.) propagate. For
-      untrusted input, call `verify/1` first.
+      untrusted input, call `verify/2` first.
       \"\"\"
       @spec decode(binary()) :: {:ok, t()} | {:error, {:malformed_buffer, Exception.t()}}
       def decode(buf) when is_binary(buf) do
@@ -664,33 +668,57 @@ defmodule Flatbuf.Codegen.Table do
       Checks every offset is within the buffer, vtables are well-formed,
       strings have their null terminator, vectors don't claim to extend
       past the buffer, required fields are present, and sub-tables are
-      recursively verified to a depth of 64. Returns `:ok` on success,
-      `{:error, reason}` on the first problem encountered.
+      recursively verified up to `:max_depth` levels deep. Returns `:ok`
+      on success, `{:error, reason, path}` on the first problem
+      encountered.
+
+      `path` is a root-first list locating the failing field: field
+      atoms, vector indices (integers), and union variant atoms. The
+      path starts at this table's first field — the root table itself
+      contributes no leading segment. Failures detected before any
+      field is reached (buffer too small, bad root offset, bad vtable)
+      carry the empty path `[]`.
+
+      ## Options
+
+        * `:max_depth` — how many levels of nested tables/union values
+          to follow before failing with reason `:depth_exceeded`
+          (default: 64).
       \"\"\"
-      @spec verify(binary()) :: :ok | {:error, term()}
-      def verify(buf) when is_binary(buf) do
+      @spec verify(binary(), keyword()) ::
+              :ok | {:error, term(), [atom() | non_neg_integer()]}
+      def verify(buf, opts \\\\ []) when is_binary(buf) do
+        max_depth = Keyword.get(opts, :max_depth, 64)
+
         with :ok <- Wire.verify_size(buf, 4),
              {:ok, root_pos} <- Wire.verify_follow_uoffset(buf, 0) do
-          __verify_at__(buf, root_pos, 64)
+          __verify_at__(buf, root_pos, max_depth)
+        else
+          {:error, reason} -> {:error, reason, []}
         end
       end
 
       @doc \"\"\"
       Verify a size-prefixed buffer claimed to be this table.
 
-      Validates the leading u32 size, then runs `verify/1` on the body.
+      Validates the leading u32 size, then runs `verify/2` on the body
+      (same options, same `:ok | {:error, reason, path}` contract).
       \"\"\"
-      @spec verify_size_prefixed(binary()) :: :ok | {:error, term()}
-      def verify_size_prefixed(<<size::little-32, rest::binary>>) when byte_size(rest) == size do
-        verify(rest)
+      @spec verify_size_prefixed(binary(), keyword()) ::
+              :ok | {:error, term(), [atom() | non_neg_integer()]}
+      def verify_size_prefixed(buf, opts \\\\ [])
+
+      def verify_size_prefixed(<<size::little-32, rest::binary>>, opts)
+          when byte_size(rest) == size do
+        verify(rest, opts)
       end
 
-      def verify_size_prefixed(<<size::little-32, rest::binary>>) do
-        {:error, {:size_prefix_mismatch, size, byte_size(rest)}}
+      def verify_size_prefixed(<<size::little-32, rest::binary>>, _opts) do
+        {:error, {:size_prefix_mismatch, size, byte_size(rest)}, []}
       end
 
-      def verify_size_prefixed(buf) when is_binary(buf) do
-        {:error, {:buffer_too_small, 4}}
+      def verify_size_prefixed(buf, _opts) when is_binary(buf) do
+        {:error, {:buffer_too_small, 4}, []}
       end
     """
   end
@@ -1335,7 +1363,7 @@ defmodule Flatbuf.Codegen.Table do
   defp verify_required_field(f) do
     """
     :ok <- (if Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) == 0,
-              do: {:error, {:missing_required, #{inspect(f.name)}}},
+              do: {:error, {:missing_required, #{inspect(f.name)}}, [#{inspect(f.name)}]},
               else: :ok)
     """
   end
@@ -1360,14 +1388,16 @@ defmodule Flatbuf.Codegen.Table do
 
       :string ->
         """
-        :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
-                  0 -> :ok
-                  o ->
-                    with :ok <- Wire.verify_inline_field(inline_size, o, 4),
-                         {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + o) do
-                      Wire.verify_string_at(buf, abs_pos)
-                    end
-                end)
+        :ok <- Wire.verify_path(
+                 (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                    0 -> :ok
+                    o ->
+                      with :ok <- Wire.verify_inline_field(inline_size, o, 4),
+                           {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + o) do
+                        Wire.verify_string_at(buf, abs_pos)
+                      end
+                  end),
+                 #{inspect(f.name)})
         """
 
       {:vector, {:union, fqn}} ->
@@ -1380,14 +1410,16 @@ defmodule Flatbuf.Codegen.Table do
         mod = fqn_to_module(fqn)
 
         """
-        :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
-                  0 -> :ok
-                  o ->
-                    with :ok <- Wire.verify_inline_field(inline_size, o, 4),
-                         {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + o) do
-                      #{mod}.__verify_at__(buf, abs_pos, depth - 1)
-                    end
-                end)
+        :ok <- Wire.verify_path(
+                 (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                    0 -> :ok
+                    o ->
+                      with :ok <- Wire.verify_inline_field(inline_size, o, 4),
+                           {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + o) do
+                        #{mod}.__verify_at__(buf, abs_pos, depth - 1)
+                      end
+                  end),
+                 #{inspect(f.name)})
         """
 
       {:union, fqn} ->
@@ -1396,31 +1428,35 @@ defmodule Flatbuf.Codegen.Table do
         {u, sz} = union_disc_info(fqn, schema)
 
         """
-        :ok <- (case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
-                  0 -> :ok
-                  type_o ->
-                    with :ok <- Wire.verify_inline_field(inline_size, type_o, #{sz}) do
-                      case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
-                        0 -> :ok
-                        value_o ->
-                          with :ok <- Wire.verify_inline_field(inline_size, value_o, 4),
-                               {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o) do
-                            disc = Wire.read_#{u}(buf, pos + type_o)
-                            #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1)
-                          end
+        :ok <- Wire.verify_path(
+                 (case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
+                    0 -> :ok
+                    type_o ->
+                      with :ok <- Wire.verify_inline_field(inline_size, type_o, #{sz}) do
+                        case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                          0 -> :ok
+                          value_o ->
+                            with :ok <- Wire.verify_inline_field(inline_size, value_o, 4),
+                                 {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o) do
+                              disc = Wire.read_#{u}(buf, pos + type_o)
+                              #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1)
+                            end
+                        end
                       end
-                    end
-                end)
+                  end),
+                 #{inspect(f.name)})
         """
     end
   end
 
   defp verify_inline_only_field(f, field_bytes) do
     """
-    :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
-              0 -> :ok
-              o -> Wire.verify_inline_field(inline_size, o, #{field_bytes})
-            end)
+    :ok <- Wire.verify_path(
+             (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                0 -> :ok
+                o -> Wire.verify_inline_field(inline_size, o, #{field_bytes})
+              end),
+             #{inspect(f.name)})
     """
   end
 
@@ -1434,42 +1470,44 @@ defmodule Flatbuf.Codegen.Table do
     {u, sz} = union_disc_info(fqn, schema)
 
     """
-    :ok <- (case {Wire.read_vtable_field(buf, pos, #{disc_slot}),
-                  Wire.read_vtable_field(buf, pos, #{f.vtable_slot})} do
-              {0, 0} ->
-                :ok
+    :ok <- Wire.verify_path(
+             (case {Wire.read_vtable_field(buf, pos, #{disc_slot}),
+                    Wire.read_vtable_field(buf, pos, #{f.vtable_slot})} do
+                {0, 0} ->
+                  :ok
 
-              {type_o, value_o} when type_o == 0 or value_o == 0 ->
-                {:error, {:union_vector_presence_mismatch, #{inspect(f.name)}}}
+                {type_o, value_o} when type_o == 0 or value_o == 0 ->
+                  {:error, :union_vector_presence_mismatch}
 
-              {type_o, value_o} ->
-                with :ok <- Wire.verify_inline_field(inline_size, type_o, 4),
-                     :ok <- Wire.verify_inline_field(inline_size, value_o, 4),
-                     {:ok, types_pos} <- Wire.verify_follow_uoffset(buf, pos + type_o),
-                     {:ok, vals_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o),
-                     {:ok, types_count} <- Wire.verify_vector_at(buf, types_pos, #{sz}),
-                     {:ok, values_count} <- Wire.verify_vector_at(buf, vals_pos, 4),
-                     :ok <-
-                       (if types_count == values_count,
-                          do: :ok,
-                          else: {:error, {:union_vector_count_mismatch, #{inspect(f.name)}, types_count, values_count}}) do
-                  Enum.reduce_while(0..(types_count - 1)//1, :ok, fn i, _ ->
-                    case Wire.read_#{u}(buf, Wire.vector_elem_pos(types_pos, i, #{sz})) do
-                      0 ->
-                        {:cont, :ok}
-
-                      disc ->
-                        with {:ok, abs_pos} <-
-                               Wire.verify_follow_uoffset(buf, Wire.vector_elem_pos(vals_pos, i, 4)),
-                             :ok <- #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1) do
+                {type_o, value_o} ->
+                  with :ok <- Wire.verify_inline_field(inline_size, type_o, 4),
+                       :ok <- Wire.verify_inline_field(inline_size, value_o, 4),
+                       {:ok, types_pos} <- Wire.verify_follow_uoffset(buf, pos + type_o),
+                       {:ok, vals_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o),
+                       {:ok, types_count} <- Wire.verify_vector_at(buf, types_pos, #{sz}),
+                       {:ok, values_count} <- Wire.verify_vector_at(buf, vals_pos, 4),
+                       :ok <-
+                         (if types_count == values_count,
+                            do: :ok,
+                            else: {:error, {:union_vector_count_mismatch, types_count, values_count}}) do
+                    Enum.reduce_while(0..(types_count - 1)//1, :ok, fn i, _ ->
+                      case Wire.read_#{u}(buf, Wire.vector_elem_pos(types_pos, i, #{sz})) do
+                        0 ->
                           {:cont, :ok}
-                        else
-                          err -> {:halt, err}
-                        end
-                    end
-                  end)
-                end
-            end)
+
+                        disc ->
+                          with {:ok, abs_pos} <-
+                                 Wire.verify_follow_uoffset(buf, Wire.vector_elem_pos(vals_pos, i, 4)),
+                               :ok <- #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1) do
+                            {:cont, :ok}
+                          else
+                            err -> {:halt, Wire.verify_path(err, i)}
+                          end
+                      end
+                    end)
+                  end
+              end),
+             #{inspect(f.name)})
     """
   end
 
@@ -1477,21 +1515,23 @@ defmodule Flatbuf.Codegen.Table do
     {elem_size, elem_verifier} = vector_elem_verify(inner, schema)
 
     """
-    :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
-              0 -> :ok
-              o ->
-                with :ok <- Wire.verify_inline_field(inline_size, o, 4),
-                     {:ok, vec_pos} <- Wire.verify_follow_uoffset(buf, pos + o),
-                     {:ok, count} <- Wire.verify_vector_at(buf, vec_pos, #{elem_size}) do
-                  Enum.reduce_while(0..(count - 1)//1, :ok, fn i, _acc ->
-                    elem_pos = Wire.vector_elem_pos(vec_pos, i, #{elem_size})
-                    case #{elem_verifier} do
-                      :ok -> {:cont, :ok}
-                      err -> {:halt, err}
-                    end
-                  end)
-                end
-            end)
+    :ok <- Wire.verify_path(
+             (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+                0 -> :ok
+                o ->
+                  with :ok <- Wire.verify_inline_field(inline_size, o, 4),
+                       {:ok, vec_pos} <- Wire.verify_follow_uoffset(buf, pos + o),
+                       {:ok, count} <- Wire.verify_vector_at(buf, vec_pos, #{elem_size}) do
+                    Enum.reduce_while(0..(count - 1)//1, :ok, fn i, _acc ->
+                      elem_pos = Wire.vector_elem_pos(vec_pos, i, #{elem_size})
+                      case #{elem_verifier} do
+                        :ok -> {:cont, :ok}
+                        err -> {:halt, Wire.verify_path(err, i)}
+                      end
+                    end)
+                  end
+              end),
+             #{inspect(f.name)})
     """
   end
 

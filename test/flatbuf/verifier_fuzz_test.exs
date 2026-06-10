@@ -3,7 +3,7 @@ defmodule Flatbuf.VerifierFuzzTest do
   SPEC §10.6: verifier fuzz corpus.
 
   Generates a battery of malformed buffers from a known-good seed and
-  asserts that the generated `verify/1` returns `:ok` or `{:error, _}`
+  asserts that the generated `verify/2` returns `:ok` or `{:error, _, _}`
   for every one — *never* raises, never lets a bad offset slip through
   to `binary_part/3`'s `:badarg`.
 
@@ -60,19 +60,19 @@ defmodule Flatbuf.VerifierFuzzTest do
     assert :ok = safe_verify(seed_buffer())
   end
 
-  test "every truncation returns :ok or {:error, _} (no raises)" do
+  test "every truncation returns :ok or {:error, _, _} (no raises)" do
     bin = seed_buffer()
 
     Enum.each(0..byte_size(bin), fn cut ->
       truncated = binary_part(bin, 0, cut)
       result = safe_verify(truncated)
 
-      assert match?(:ok, result) or match?({:error, _}, result),
+      assert match?(:ok, result) or match?({:error, _, _}, result),
              "truncation at #{cut} produced #{inspect(result)}"
     end)
   end
 
-  test "every single-byte flip returns :ok or {:error, _} (no raises)" do
+  test "every single-byte flip returns :ok or {:error, _, _} (no raises)" do
     bin = seed_buffer()
 
     Enum.each(0..(byte_size(bin) - 1), fn pos ->
@@ -80,7 +80,7 @@ defmodule Flatbuf.VerifierFuzzTest do
       mutated = <<head::binary, Bitwise.bxor(b, 0xFF), tail::binary>>
       result = safe_verify(mutated)
 
-      assert match?(:ok, result) or match?({:error, _}, result),
+      assert match?(:ok, result) or match?({:error, _, _}, result),
              "byte-flip at #{pos} produced #{inspect(result)}"
     end)
   end
@@ -89,7 +89,7 @@ defmodule Flatbuf.VerifierFuzzTest do
   # buffer (not every 4-byte slot is a length), so rejection isn't
   # guaranteed — the property is that the verifier never crashes or
   # reads out of bounds.
-  test "huge u32 length injections never crash (return :ok or {:error, _})" do
+  test "huge u32 length injections never crash (return :ok or {:error, _, _})" do
     bin = seed_buffer()
 
     # Try injecting a 0xFFFFFFFE length at every 4-byte aligned position
@@ -101,7 +101,7 @@ defmodule Flatbuf.VerifierFuzzTest do
       mutated = <<head::binary, big_len::binary, tail::binary>>
       result = safe_verify(mutated)
 
-      assert match?(:ok, result) or match?({:error, _}, result),
+      assert match?(:ok, result) or match?({:error, _, _}, result),
              "huge-length at #{pos} produced #{inspect(result)}"
     end)
   end
@@ -114,7 +114,7 @@ defmodule Flatbuf.VerifierFuzzTest do
     <<_::binary-size(4), rest::binary>> = bin
     mutated = <<big_off::binary, rest::binary>>
 
-    assert {:error, _} = safe_verify(mutated)
+    assert {:error, _, _} = safe_verify(mutated)
   end
 
   test "root uoffset of 0 (would point at itself) is rejected" do
@@ -123,11 +123,11 @@ defmodule Flatbuf.VerifierFuzzTest do
     mutated = <<0, 0, 0, 0, rest::binary>>
 
     result = safe_verify(mutated)
-    assert match?({:error, _}, result), "expected error, got #{inspect(result)}"
+    assert match?({:error, _, _}, result), "expected error, got #{inspect(result)}"
   end
 
   test "all-zeros buffer is rejected" do
-    assert {:error, _} = safe_verify(:binary.copy(<<0>>, 128))
+    assert {:error, _, _} = safe_verify(:binary.copy(<<0>>, 128))
   end
 
   # Random bytes could in principle form a valid buffer, so we assert
@@ -139,7 +139,7 @@ defmodule Flatbuf.VerifierFuzzTest do
       junk = :crypto.strong_rand_bytes(64)
       result = safe_verify(junk)
 
-      assert match?(:ok, result) or match?({:error, _}, result),
+      assert match?(:ok, result) or match?({:error, _, _}, result),
              "random buffer #{inspect(junk)} produced #{inspect(result)} (from #{inspect(seed_pid)})"
     end)
   end

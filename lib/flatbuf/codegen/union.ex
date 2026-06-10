@@ -46,13 +46,10 @@ defmodule Flatbuf.Codegen.Union do
     from_json_clauses = build_from_json_clauses(u)
     verify_clauses = build_verify_clauses(u)
 
-    # Only string variants and struct-in-union variants use the Wire
-    # helper directly. Skip the alias otherwise to avoid an "unused
-    # alias" warning on table-only unions.
-    needs_wire? =
-      Enum.any?(u.variants, fn {_, type, _} ->
-        match?(:string, type) or match?({:struct, _}, type)
-      end)
+    # Every variant's `__verify_variant__/4` clause threads the error
+    # path through `Wire.verify_path/2`, so any union with variants
+    # needs the Wire alias. Only a (degenerate) empty union skips it.
+    needs_wire? = u.variants != []
 
     wire_alias = if needs_wire?, do: "  alias #{inspect(wire_module)}, as: Wire\n", else: ""
 
@@ -116,7 +113,7 @@ defmodule Flatbuf.Codegen.Union do
     #{from_json_clauses}
       @doc false
       def __verify_variant__(_buf, 0, _abs_pos, _depth), do: :ok
-    #{verify_clauses}  def __verify_variant__(_buf, disc, _abs_pos, _depth), do: {:error, {:unknown_union_variant, disc}}
+    #{verify_clauses}  def __verify_variant__(_buf, disc, _abs_pos, _depth), do: {:error, {:unknown_union_variant, disc}, []}
     end
     """
 
@@ -228,10 +225,12 @@ defmodule Flatbuf.Codegen.Union do
   defp build_verify_clauses(u) do
     u.variants
     |> dedup_by_disc()
-    |> Enum.map_join("", fn {_name, type, disc} ->
+    |> Enum.map_join("", fn {name, type, disc} ->
       # Only the table variant recurses with `depth - 1`; struct and
       # string variants ignore depth, so underscore it on those clauses
-      # to keep the compiler quiet.
+      # to keep the compiler quiet. Every clause wraps its result in
+      # `Wire.verify_path/2` so the error path gains the variant atom;
+      # the calling table prepends the field name on top.
       {expr, depth_param} =
         case type do
           {:table, fqn} ->
@@ -245,7 +244,8 @@ defmodule Flatbuf.Codegen.Union do
             {"Wire.verify_string_at(buf, abs_pos)", "_depth"}
         end
 
-      "  def __verify_variant__(buf, #{disc}, abs_pos, #{depth_param}), do: #{expr}\n"
+      "  def __verify_variant__(buf, #{disc}, abs_pos, #{depth_param}), " <>
+        "do: Wire.verify_path(#{expr}, #{inspect(name)})\n"
     end)
   end
 

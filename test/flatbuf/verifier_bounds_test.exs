@@ -93,7 +93,7 @@ defmodule Flatbuf.VerifierBoundsTest do
     for slot <- present do
       mutated = put_u16(bin, vt_pos + slot, 0xFF00)
 
-      assert {:error, {:inline_field_out_of_bounds, 0xFF00, _, _}} = safe_verify(mutated),
+      assert {:error, {:inline_field_out_of_bounds, 0xFF00, _, _}, [_]} = safe_verify(mutated),
              "slot #{slot} patched to 0xFF00 must fail verify"
     end
   end
@@ -113,7 +113,7 @@ defmodule Flatbuf.VerifierBoundsTest do
       mutated = put_u16(bin, vt_pos + slot, sneaky)
       result = safe_verify(mutated)
 
-      assert match?({:error, _}, result),
+      assert match?({:error, _, _}, result),
              "slot #{slot} patched to #{sneaky} produced #{inspect(result)}"
     end
   end
@@ -132,7 +132,7 @@ defmodule Flatbuf.VerifierBoundsTest do
           assert {:ok, _} = BoundsV.Outer.decode(mutated),
                  "verify passed slot #{slot} = #{v} but decode failed"
 
-        {:error, _} ->
+        {:error, _, _} ->
           :ok
 
         {:raised, e} ->
@@ -146,8 +146,9 @@ defmodule Flatbuf.VerifierBoundsTest do
     {vt_pos, _, _} = root_vtable(bin)
 
     # Claim a giant inline area: the header check must reject it
-    # before any slot check trusts it.
+    # before any slot check trusts it (path is empty — the failure
+    # precedes any field).
     mutated = put_u16(bin, vt_pos + 2, 0xFFFF)
-    assert {:error, _} = safe_verify(mutated)
+    assert {:error, _, []} = safe_verify(mutated)
   end
 end
