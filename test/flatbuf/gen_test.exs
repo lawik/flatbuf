@@ -99,4 +99,39 @@ defmodule Flatbuf.GenTest do
       ])
     end
   end
+
+  describe "niceties validation" do
+    test "parse_niceties accepts the known set" do
+      assert Gen.parse_niceties(nil) == []
+      assert Gen.parse_niceties("behaviour") == [:behaviour]
+      assert Gen.parse_niceties("behaviour, jason") == [:behaviour, :jason]
+    end
+
+    test "parse_niceties rejects unknown names with the valid set in the message" do
+      assert_raise ArgumentError, ~r/unknown nicety "behavior".*behaviour, jason/, fn ->
+        Gen.parse_niceties("behavior")
+      end
+    end
+
+    test "validate_niceties! passes known atoms through and rejects unknowns" do
+      assert Gen.validate_niceties!([]) == []
+      assert Gen.validate_niceties!([:jason, :behaviour]) == [:jason, :behaviour]
+
+      assert_raise ArgumentError, ~r/unknown niceties \[:behavior\].*behaviour, jason/, fn ->
+        Gen.validate_niceties!([:behavior, :jason])
+      end
+    end
+
+    test "flatbuf.gen surfaces a nicety typo as a Mix error", ctx do
+      assert_raise Mix.Error, ~r/flatbuf\.gen: unknown nicety "behavior"/, fn ->
+        Mix.Task.rerun("flatbuf.gen", [ctx.schema_path, "--niceties", "behavior"])
+      end
+    end
+
+    test "flatbuf.gen.check surfaces a nicety typo as a Mix error", ctx do
+      assert_raise Mix.Error, ~r/flatbuf\.gen\.check: unknown nicety "behavior"/, fn ->
+        Mix.Task.rerun("flatbuf.gen.check", [ctx.schema_path, "--niceties", "behavior"])
+      end
+    end
+  end
 end

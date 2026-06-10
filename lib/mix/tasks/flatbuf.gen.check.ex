@@ -42,7 +42,7 @@ defmodule Mix.Tasks.Flatbuf.Gen.Check do
       wire_module: opts[:wire_module] || "Flatbuf.Generated.Wire",
       namespace: opts[:namespace],
       include: Keyword.get_values(opts, :include),
-      niceties: Flatbuf.Gen.parse_niceties(opts[:niceties])
+      niceties: parse_niceties!(opts[:niceties])
     ]
 
     case Gen.plan(paths, plan_opts) do
@@ -73,5 +73,11 @@ defmodule Mix.Tasks.Flatbuf.Gen.Check do
       File.read!(path) != source -> [{"differs  ", path}]
       true -> []
     end
+  end
+
+  defp parse_niceties!(value) do
+    Gen.parse_niceties(value)
+  rescue
+    e in ArgumentError -> Mix.raise("flatbuf.gen.check: " <> Exception.message(e))
   end
 end

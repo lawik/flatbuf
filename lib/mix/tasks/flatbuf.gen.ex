@@ -29,8 +29,22 @@ defmodule Mix.Tasks.Flatbuf.Gen do
     * `--niceties LIST` — comma-separated opt-in protocols/behaviours
       to wire into generated tables. Currently supported:
       `behaviour` (implements `Flatbuf.Table`), `jason`
-      (derives `Jason.Encoder`).
+      (derives `Jason.Encoder`). Unknown names abort the task.
     * `--force` — overwrite outputs even when their content is unchanged.
+
+  ## Nicety dependency caveats
+
+  Niceties add references the *consumer* project must satisfy:
+
+    * `jason` — the generated `@derive Jason.Encoder` only compiles if
+      your project depends on `:jason`. Add `{:jason, "~> 1.4"}` to
+      your deps before enabling it.
+    * `behaviour` — the generated `@behaviour Flatbuf.Table` needs
+      `:flatbuf` available when the generated code compiles. If you
+      depend on `:flatbuf` with `only: [:dev, :test]`, prod compiles
+      will warn that the `Flatbuf.Table` behaviour is undefined (a hard
+      failure under `--warnings-as-errors`). Use a regular dependency
+      if you enable this nicety.
   """
 
   use Mix.Task
@@ -60,7 +74,7 @@ defmodule Mix.Tasks.Flatbuf.Gen do
       wire_module: opts[:wire_module] || "Flatbuf.Generated.Wire",
       namespace: opts[:namespace],
       include: Keyword.get_values(opts, :include),
-      niceties: Flatbuf.Gen.parse_niceties(opts[:niceties])
+      niceties: parse_niceties!(opts[:niceties])
     ]
 
     force? = Keyword.get(opts, :force, false)
@@ -94,5 +108,11 @@ defmodule Mix.Tasks.Flatbuf.Gen do
       {:error, {path, reason}} ->
         Mix.raise("flatbuf.gen: #{path}: #{inspect(reason)}")
     end
+  end
+
+  defp parse_niceties!(value) do
+    Gen.parse_niceties(value)
+  rescue
+    e in ArgumentError -> Mix.raise("flatbuf.gen: " <> Exception.message(e))
   end
 end
