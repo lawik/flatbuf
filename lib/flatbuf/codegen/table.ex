@@ -61,10 +61,12 @@ defmodule Flatbuf.Codegen.Table do
 
     # An empty table has nothing to read in decode_at; underscore the
     # params to avoid the "variable is unused" warning the compiler
-    # would otherwise emit on the generated source.
+    # would otherwise emit on the generated source. Same deal for the
+    # verifier's inline_size: only field clauses consume it.
     has_fields? = t.fields != []
     buf_param = if has_fields?, do: "buf", else: "_buf"
     pos_param = if has_fields?, do: "pos", else: "_pos"
+    inline_size_param = if has_fields?, do: "inline_size", else: "_inline_size"
 
     source = """
     defmodule #{module_name} do
@@ -105,7 +107,7 @@ defmodule Flatbuf.Codegen.Table do
       def __verify_at__(_buf, _pos, 0), do: {:error, :depth_exceeded}
 
       def __verify_at__(buf, pos, #{if recurses?(t), do: "depth", else: "_depth"}) do
-        with {:ok, _vt_pos, _vt_size, _inline_size} <- Wire.verify_table_header(buf, pos) do
+        with {:ok, _vt_pos, _vt_size, #{inline_size_param}} <- Wire.verify_table_header(buf, pos) do
     #{verify_body}    end
       end
 
@@ -424,7 +426,10 @@ defmodule Flatbuf.Codegen.Table do
       {:vector, {:union, fqn}} ->
         # Vectors of unions are stored as two parallel vectors in the
         # vtable: a `[u8]` of discriminators at `vtable_slot - 2` and
-        # a `[uoffset]` of variant values at `vtable_slot`.
+        # a `[uoffset]` of variant values at `vtable_slot`. A NONE
+        # (discriminator 0) element decodes to nil without touching
+        # its value slot — flatc's verifier deliberately leaves that
+        # slot uninspected, so its bytes are not to be trusted.
         disc_slot = f.vtable_slot - 2
 
         """
@@ -441,10 +446,15 @@ defmodule Flatbuf.Codegen.Table do
                         []
                       else
                         for i <- 0..(count - 1) do
-                          disc = Wire.read_u8(buf, Wire.vector_elem_pos(types_abs, i, 1))
-                          elem_pos = Wire.vector_elem_pos(values_abs, i, 4)
-                          abs_pos = Wire.follow_uoffset(buf, elem_pos)
-                          #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                          case Wire.read_u8(buf, Wire.vector_elem_pos(types_abs, i, 1)) do
+                            0 ->
+                              nil
+
+                            disc ->
+                              elem_pos = Wire.vector_elem_pos(values_abs, i, 4)
+                              abs_pos = Wire.follow_uoffset(buf, elem_pos)
+                              #{fqn_to_module(fqn)}.decode_variant(buf, disc, abs_pos)
+                          end
                         end
                       end
                   end
@@ -597,6 +607,8 @@ defmodule Flatbuf.Codegen.Table do
           {:ok, Wire.to_binary(builder)}
         catch
           {:flatbuf_required, _} = err -> {:error, err}
+          {:scalar_out_of_range, _, _, _} = err -> {:error, err}
+          {:invalid_scalar, _, _, _} = err -> {:error, err}
         end
       end
 
@@ -610,6 +622,8 @@ defmodule Flatbuf.Codegen.Table do
           {:ok, Wire.to_binary(builder)}
         catch
           {:flatbuf_required, _} = err -> {:error, err}
+          {:scalar_out_of_range, _, _, _} = err -> {:error, err}
+          {:invalid_scalar, _, _, _} = err -> {:error, err}
         end
       end
     """
@@ -932,9 +946,12 @@ defmodule Flatbuf.Codegen.Table do
         """
             {b, #{var}} =
               case #{field_lookup} do
-                nil -> {b, nil}
-                [] -> Wire.create_scalar_vector(b, [], #{sz}, #{elem_align}, &Wire.push_#{kind}/2)
-                list when is_list(list) -> Wire.create_scalar_vector(b, list, #{sz}, #{elem_align}, &Wire.push_#{kind}/2)
+                nil ->
+                  {b, nil}
+
+                list when is_list(list) ->
+                  list = Enum.map(list, &Wire.check_scalar!(&1, #{inspect(kind)}, #{inspect(f.name)}))
+                  Wire.create_scalar_vector(b, list, #{sz}, #{elem_align}, &Wire.push_#{kind}/2)
               end
         """
 
@@ -994,6 +1011,7 @@ defmodule Flatbuf.Codegen.Table do
         sz = Schema.scalar_size(u)
         elem_align = max(sz, force)
         mod = fqn_to_module(fqn)
+        check_kind = if u == :bool, do: :u8, else: u
 
         """
             {b, #{var}} =
@@ -1002,7 +1020,9 @@ defmodule Flatbuf.Codegen.Table do
                   {b, nil}
 
                 list when is_list(list) ->
-                  ints = Enum.map(list, &#{mod}.value/1)
+                  ints =
+                    Enum.map(list, &Wire.check_scalar!(#{mod}.value(&1), #{inspect(check_kind)}, #{inspect(f.name)}))
+
                   Wire.create_scalar_vector(b, ints, #{sz}, #{elem_align}, &Wire.push_#{u}/2)
               end
         """
@@ -1054,15 +1074,19 @@ defmodule Flatbuf.Codegen.Table do
 
     case f.type do
       {:scalar, kind} ->
+        # `= null` marks the field optional: nil is the omission
+        # sentinel (so the slot is skipped when absent), and the
+        # validator lets nil pass through.
+        optional? = f.default == :null
         default = default_value(f, schema)
-        default_expr = literal_for_scalar(default, kind)
 
         raw_value =
-          "Map.get(value, #{inspect(f.name)}, #{inspect(default_value(f, schema))})"
+          "Map.get(value, #{inspect(f.name)}, #{inspect(default)})"
 
         # `(hash: "fnv1_32")` etc. lets the user pass a string in place
         # of the int; the encoder hashes it on the way down. Integers
-        # pass through unchanged.
+        # pass through unchanged. Validation runs post-hash, on the
+        # integer headed for the wire.
         value_expr =
           case Map.get(f.attributes, :hash) do
             nil ->
@@ -1072,25 +1096,18 @@ defmodule Flatbuf.Codegen.Table do
               "Wire.maybe_hash(#{raw_value}, #{inspect(String.to_atom(alg))})"
           end
 
-        coerced =
-          if kind == :bool do
-            "(if #{value_expr}, do: 1, else: 0)"
-          else
-            value_expr
-          end
+        check_fn =
+          if optional?, do: "Wire.check_optional_scalar!", else: "Wire.check_scalar!"
+
+        checked = "#{check_fn}(#{value_expr}, #{inspect(kind)}, #{inspect(f.name)})"
 
         push_fn =
-          if kind == :bool, do: "&Wire.push_u8/2", else: "&Wire.push_#{kind}/2"
+          if kind == :bool, do: "&Wire.push_bool/2", else: "&Wire.push_#{kind}/2"
 
-        default_for_push =
-          if kind == :bool do
-            if default, do: 1, else: 0
-          else
-            default_expr
-          end
+        default_for_push = if optional?, do: nil, else: default
 
         """
-            b = Wire.add_field_scalar(b, #{slot}, #{coerced}, #{inspect(default_for_push)}, #{push_fn})
+            b = Wire.add_field_scalar(b, #{slot}, #{checked}, #{inspect(default_for_push)}, #{push_fn})
         """
 
       :string ->
@@ -1127,18 +1144,43 @@ defmodule Flatbuf.Codegen.Table do
 
       {:enum, fqn} ->
         %SchemaEnum{underlying_type: u} = enum_rec = Schema.fetch(schema, fqn)
+        optional? = f.default == :null
         default = default_value(f, schema)
         mod = fqn_to_module(fqn)
-        default_int = enum_default_int(enum_rec, default)
-
-        value_atom = "Map.get(value, #{inspect(f.name)}, #{inspect(default)})"
-        value_expr = "#{mod}.value(#{value_atom})"
 
         push_fn =
           if u == :bool, do: "&Wire.push_u8/2", else: "&Wire.push_#{u}/2"
 
+        check_kind = if u == :bool, do: :u8, else: u
+
+        checked =
+          "Wire.check_scalar!(#{mod}.value(v), #{inspect(check_kind)}, #{inspect(f.name)})"
+
+        # A nil value means: omit when the field is optional (`= null`)
+        # or has no representable default (empty enum); otherwise it's
+        # a wrong-typed value and gets the same tagged throw the
+        # scalar validator uses.
+        nil_branch =
+          if optional? or default == nil do
+            "b"
+          else
+            "throw({:invalid_scalar, #{inspect(f.name)}, #{inspect(check_kind)}, nil})"
+          end
+
+        {lookup, default_for_push} =
+          if optional? do
+            {"Map.get(value, #{inspect(f.name)})", nil}
+          else
+            {"Map.get(value, #{inspect(f.name)}, #{inspect(default)})",
+             enum_default_int(enum_rec, default)}
+          end
+
         """
-            b = Wire.add_field_scalar(b, #{slot}, #{value_expr}, #{default_int}, #{push_fn})
+            b =
+              case #{lookup} do
+                nil -> #{nil_branch}
+                v -> Wire.add_field_scalar(b, #{slot}, #{checked}, #{inspect(default_for_push)}, #{push_fn})
+              end
         """
 
       {:struct, fqn} ->
@@ -1165,13 +1207,6 @@ defmodule Flatbuf.Codegen.Table do
         """
     end
   end
-
-  defp literal_for_scalar(v, _kind) when is_number(v), do: v
-  defp literal_for_scalar(v, _kind) when is_boolean(v), do: if(v, do: 1, else: 0)
-  defp literal_for_scalar(nil, _kind), do: 0
-  # NaN/Infinity default literals — emit them as atoms; the wire helper
-  # writes the IEEE 754 bit pattern when these come through push_f32/f64.
-  defp literal_for_scalar(atom, _kind) when atom in [:nan, :infinity, :neg_infinity], do: atom
 
   # -----------------------------------------------------------------------
   # Verifier
@@ -1204,6 +1239,7 @@ defmodule Flatbuf.Codegen.Table do
   defp recurses_field?({:table, _}), do: true
   defp recurses_field?({:union, _}), do: true
   defp recurses_field?({:vector, {:table, _}}), do: true
+  defp recurses_field?({:vector, {:union, _}}), do: true
   defp recurses_field?(_), do: false
 
   defp build_verify_at(t, schema) do
@@ -1242,66 +1278,38 @@ defmodule Flatbuf.Codegen.Table do
     """
   end
 
+  # Every present slot's voffset comes straight out of the (untrusted)
+  # vtable, so each clause first checks the slot's bytes fit inside the
+  # table's inline area via `Wire.verify_inline_field/3` — scalars and
+  # inline structs in full, offset-typed fields for their 4-byte
+  # uoffset — before anything dereferences it.
   defp verify_field(f, schema) do
     case f.type do
-      {:scalar, _} ->
-        # Scalars live inline in the table; the vtable header check
-        # already bounded the inline area, so no extra work needed.
-        ""
+      {:scalar, kind} ->
+        verify_inline_only_field(f, Schema.scalar_size(kind))
 
-      {:enum, _} ->
-        ""
+      {:enum, fqn} ->
+        %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
+        verify_inline_only_field(f, Schema.scalar_size(u))
 
-      {:struct, _} ->
-        # Inline struct — bounded by inline_size.
-        ""
+      {:struct, fqn} ->
+        %SchemaStruct{size: sz} = Schema.fetch(schema, fqn)
+        verify_inline_only_field(f, sz)
 
       :string ->
         """
         :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
                   0 -> :ok
                   o ->
-                    case Wire.verify_follow_uoffset(buf, pos + o) do
-                      {:ok, abs_pos} -> Wire.verify_string_at(buf, abs_pos)
-                      err -> err
+                    with :ok <- Wire.verify_inline_field(inline_size, o, 4),
+                         {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + o) do
+                      Wire.verify_string_at(buf, abs_pos)
                     end
                 end)
         """
 
       {:vector, {:union, fqn}} ->
-        # Vector-of-union: two parallel vectors. Bounds-check both,
-        # then dispatch each (discriminator, value) pair through the
-        # union module's `__verify_variant__/4`.
-        mod = fqn_to_module(fqn)
-        disc_slot = f.vtable_slot - 2
-
-        """
-        :ok <- (case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
-                  0 -> :ok
-                  type_o ->
-                    case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
-                      0 -> :ok
-                      value_o ->
-                        with {:ok, types_pos} <- Wire.verify_follow_uoffset(buf, pos + type_o),
-                             {:ok, vals_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o),
-                             {:ok, _} <- Wire.verify_vector_at(buf, types_pos, 1),
-                             {:ok, count} <- Wire.verify_vector_at(buf, vals_pos, 4) do
-                          Enum.reduce_while(0..(count - 1)//1, :ok, fn i, _ ->
-                            disc = Wire.read_u8(buf, Wire.vector_elem_pos(types_pos, i, 1))
-                            val_elem = Wire.vector_elem_pos(vals_pos, i, 4)
-                            case Wire.verify_follow_uoffset(buf, val_elem) do
-                              {:ok, abs_pos} ->
-                                case #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1) do
-                                  :ok -> {:cont, :ok}
-                                  err -> {:halt, err}
-                                end
-                              err -> {:halt, err}
-                            end
-                          end)
-                        end
-                    end
-                end)
-        """
+        verify_union_vector_field(f, fqn)
 
       {:vector, inner} ->
         verify_vector_field(f, inner, schema)
@@ -1313,9 +1321,9 @@ defmodule Flatbuf.Codegen.Table do
         :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
                   0 -> :ok
                   o ->
-                    case Wire.verify_follow_uoffset(buf, pos + o) do
-                      {:ok, abs_pos} -> #{mod}.__verify_at__(buf, abs_pos, depth - 1)
-                      err -> err
+                    with :ok <- Wire.verify_inline_field(inline_size, o, 4),
+                         {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + o) do
+                      #{mod}.__verify_at__(buf, abs_pos, depth - 1)
                     end
                 end)
         """
@@ -1328,21 +1336,77 @@ defmodule Flatbuf.Codegen.Table do
         :ok <- (case Wire.read_vtable_field(buf, pos, #{disc_slot}) do
                   0 -> :ok
                   type_o ->
-                    with :ok <- Wire.verify_bounds(buf, pos + type_o, 1) do
+                    with :ok <- Wire.verify_inline_field(inline_size, type_o, 1) do
                       case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
                         0 -> :ok
                         value_o ->
-                          case Wire.verify_follow_uoffset(buf, pos + value_o) do
-                            {:ok, abs_pos} ->
-                              disc = Wire.read_u8(buf, pos + type_o)
-                              #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1)
-                            err -> err
+                          with :ok <- Wire.verify_inline_field(inline_size, value_o, 4),
+                               {:ok, abs_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o) do
+                            disc = Wire.read_u8(buf, pos + type_o)
+                            #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1)
                           end
                       end
                     end
                 end)
         """
     end
+  end
+
+  defp verify_inline_only_field(f, field_bytes) do
+    """
+    :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
+              0 -> :ok
+              o -> Wire.verify_inline_field(inline_size, o, #{field_bytes})
+            end)
+    """
+  end
+
+  # Vector-of-union: two parallel vectors that must agree. Mirrors
+  # flatc's generated Verify<Union>Vector: both-or-neither present,
+  # equal element counts, and NONE (discriminator 0) elements verified
+  # by skipping their value slot entirely.
+  defp verify_union_vector_field(f, fqn) do
+    mod = fqn_to_module(fqn)
+    disc_slot = f.vtable_slot - 2
+
+    """
+    :ok <- (case {Wire.read_vtable_field(buf, pos, #{disc_slot}),
+                  Wire.read_vtable_field(buf, pos, #{f.vtable_slot})} do
+              {0, 0} ->
+                :ok
+
+              {type_o, value_o} when type_o == 0 or value_o == 0 ->
+                {:error, {:union_vector_presence_mismatch, #{inspect(f.name)}}}
+
+              {type_o, value_o} ->
+                with :ok <- Wire.verify_inline_field(inline_size, type_o, 4),
+                     :ok <- Wire.verify_inline_field(inline_size, value_o, 4),
+                     {:ok, types_pos} <- Wire.verify_follow_uoffset(buf, pos + type_o),
+                     {:ok, vals_pos} <- Wire.verify_follow_uoffset(buf, pos + value_o),
+                     {:ok, types_count} <- Wire.verify_vector_at(buf, types_pos, 1),
+                     {:ok, values_count} <- Wire.verify_vector_at(buf, vals_pos, 4),
+                     :ok <-
+                       (if types_count == values_count,
+                          do: :ok,
+                          else: {:error, {:union_vector_count_mismatch, #{inspect(f.name)}, types_count, values_count}}) do
+                  Enum.reduce_while(0..(types_count - 1)//1, :ok, fn i, _ ->
+                    case Wire.read_u8(buf, Wire.vector_elem_pos(types_pos, i, 1)) do
+                      0 ->
+                        {:cont, :ok}
+
+                      disc ->
+                        with {:ok, abs_pos} <-
+                               Wire.verify_follow_uoffset(buf, Wire.vector_elem_pos(vals_pos, i, 4)),
+                             :ok <- #{mod}.__verify_variant__(buf, disc, abs_pos, depth - 1) do
+                          {:cont, :ok}
+                        else
+                          err -> {:halt, err}
+                        end
+                    end
+                  end)
+                end
+            end)
+    """
   end
 
   defp verify_vector_field(f, inner, schema) do
@@ -1352,21 +1416,16 @@ defmodule Flatbuf.Codegen.Table do
     :ok <- (case Wire.read_vtable_field(buf, pos, #{f.vtable_slot}) do
               0 -> :ok
               o ->
-                case Wire.verify_follow_uoffset(buf, pos + o) do
-                  {:ok, vec_pos} ->
-                    case Wire.verify_vector_at(buf, vec_pos, #{elem_size}) do
-                      {:ok, count} when count == 0 -> :ok
-                      {:ok, count} ->
-                        Enum.reduce_while(0..(count - 1), :ok, fn i, _acc ->
-                          elem_pos = Wire.vector_elem_pos(vec_pos, i, #{elem_size})
-                          case #{elem_verifier} do
-                            :ok -> {:cont, :ok}
-                            err -> {:halt, err}
-                          end
-                        end)
-                      err -> err
+                with :ok <- Wire.verify_inline_field(inline_size, o, 4),
+                     {:ok, vec_pos} <- Wire.verify_follow_uoffset(buf, pos + o),
+                     {:ok, count} <- Wire.verify_vector_at(buf, vec_pos, #{elem_size}) do
+                  Enum.reduce_while(0..(count - 1)//1, :ok, fn i, _acc ->
+                    elem_pos = Wire.vector_elem_pos(vec_pos, i, #{elem_size})
+                    case #{elem_verifier} do
+                      :ok -> {:cont, :ok}
+                      err -> {:halt, err}
                     end
-                  err -> err
+                  end)
                 end
             end)
     """

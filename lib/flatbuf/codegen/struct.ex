@@ -219,47 +219,25 @@ defmodule Flatbuf.Codegen.Struct do
     last.offset + last.size
   end
 
+  # Every scalar headed for the wire goes through `Wire.check_scalar!/3`
+  # first — Elixir binary construction truncates out-of-range integers
+  # silently, and a struct encoder built from `<<v::little-16>>` parts
+  # would otherwise corrupt data without a word. The throw is caught by
+  # the enclosing table's generated `encode/1`.
   defp encode_field_part(f, schema) do
     val = "Map.get(value, #{inspect(f.name)}, #{inspect(default_for(f.type))})"
 
     case f.type do
       {:scalar, :bool} ->
-        "(if #{val}, do: 1, else: 0)::8"
+        "(if #{checked(val, :bool, f.name)}, do: 1, else: 0)::8"
 
-      {:scalar, :u8} ->
-        "(#{val})::8"
-
-      {:scalar, :i8} ->
-        "(#{val})::signed-8"
-
-      {:scalar, :u16} ->
-        "(#{val})::little-16"
-
-      {:scalar, :i16} ->
-        "(#{val})::little-signed-16"
-
-      {:scalar, :u32} ->
-        "(#{val})::little-32"
-
-      {:scalar, :i32} ->
-        "(#{val})::little-signed-32"
-
-      {:scalar, :u64} ->
-        "(#{val})::little-64"
-
-      {:scalar, :i64} ->
-        "(#{val})::little-signed-64"
-
-      {:scalar, :f32} ->
-        "(#{val})::little-float-32"
-
-      {:scalar, :f64} ->
-        "(#{val})::little-float-64"
+      {:scalar, kind} ->
+        "(#{checked(val, kind, f.name)})::#{scalar_bin_spec(kind)}"
 
       {:enum, fqn} ->
         %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
         spec = scalar_bin_spec(u)
-        "#{fqn_to_module(fqn)}.value(#{val})::#{spec}"
+        "(#{checked("#{fqn_to_module(fqn)}.value(#{val})", check_kind(u), f.name)})::#{spec}"
 
       {:struct, fqn} ->
         "(#{fqn_to_module(fqn)}.encode(#{val}))::binary"
@@ -269,6 +247,13 @@ defmodule Flatbuf.Codegen.Struct do
         "(__encode_arr_#{f.name}(value))::binary"
     end
   end
+
+  defp checked(val_expr, kind, field_name),
+    do: "Wire.check_scalar!(#{val_expr}, #{inspect(kind)}, #{inspect(field_name)})"
+
+  # Enums with a bool underlying type carry 0/1 ints out of `value/1`.
+  defp check_kind(:bool), do: :u8
+  defp check_kind(kind), do: kind
 
   # ----------------------------------------------------------------------
   # Fixed-size array helpers (one defp per array-typed struct field)
@@ -289,7 +274,7 @@ defmodule Flatbuf.Codegen.Struct do
         list = Map.get(value, #{inspect(f.name)}, [])
         list = list ++ List.duplicate(#{inspect(elem_default)}, max(0, #{n} - length(list)))
         list = Enum.take(list, #{n})
-        for v <- list, into: <<>>, do: #{array_elem_bin(inner, "v", schema)}
+        for v <- list, into: <<>>, do: #{array_elem_bin(inner, "v", schema, f.name)}
       end
     """
   end
@@ -303,15 +288,19 @@ defmodule Flatbuf.Codegen.Struct do
     atom
   end
 
-  defp array_elem_bin({:scalar, kind}, var, _),
-    do: "<<(#{var})::#{scalar_bin_spec(kind)}>>"
+  defp array_elem_bin({:scalar, :bool}, var, _, field_name),
+    do: "<<(if #{checked(var, :bool, field_name)}, do: 1, else: 0)::8>>"
 
-  defp array_elem_bin({:enum, fqn}, var, schema) do
+  defp array_elem_bin({:scalar, kind}, var, _, field_name),
+    do: "<<(#{checked(var, kind, field_name)})::#{scalar_bin_spec(kind)}>>"
+
+  defp array_elem_bin({:enum, fqn}, var, schema, field_name) do
     %SchemaEnum{underlying_type: u} = Schema.fetch(schema, fqn)
-    "<<(#{fqn_to_module(fqn)}.value(#{var}))::#{scalar_bin_spec(u)}>>"
+
+    "<<(#{checked("#{fqn_to_module(fqn)}.value(#{var})", check_kind(u), field_name)})::#{scalar_bin_spec(u)}>>"
   end
 
-  defp array_elem_bin({:struct, fqn}, var, _),
+  defp array_elem_bin({:struct, fqn}, var, _, _field_name),
     do: "#{fqn_to_module(fqn)}.encode(#{var})"
 
   # ----------------------------------------------------------------------
