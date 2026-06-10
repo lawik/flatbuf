@@ -135,7 +135,7 @@ defmodule Flatbuf.UnionVectorEdgeTest do
       {types_pos, _vals_pos} = vector_count_positions(bin)
 
       mutated = put_u32(bin, types_pos, 1)
-      assert {:error, {:union_vector_count_mismatch, :items, 1, 2}} = safe_verify(mutated)
+      assert {:error, {:union_vector_count_mismatch, 1, 2}, [:items]} = safe_verify(mutated)
     end
 
     test "a shrunken values count fails verify with a tagged error" do
@@ -143,7 +143,7 @@ defmodule Flatbuf.UnionVectorEdgeTest do
       {_types_pos, vals_pos} = vector_count_positions(bin)
 
       mutated = put_u32(bin, vals_pos, 1)
-      assert {:error, {:union_vector_count_mismatch, :items, 2, 1}} = safe_verify(mutated)
+      assert {:error, {:union_vector_count_mismatch, 2, 1}, [:items]} = safe_verify(mutated)
     end
 
     test "an inflated values count fails verify without raising" do
@@ -157,7 +157,7 @@ defmodule Flatbuf.UnionVectorEdgeTest do
         mutated = put_u32(bin, pos, count)
         result = safe_verify(mutated)
 
-        assert match?({:error, _}, result),
+        assert match?({:error, _, _}, result),
                "count #{count} at #{pos} produced #{inspect(result)}"
       end
     end
@@ -168,10 +168,10 @@ defmodule Flatbuf.UnionVectorEdgeTest do
       vt_pos = root_pos - @wire.read_i32(bin, root_pos)
 
       no_types = put_u16(bin, vt_pos + @items_type_slot, 0)
-      assert {:error, {:union_vector_presence_mismatch, :items}} = safe_verify(no_types)
+      assert {:error, :union_vector_presence_mismatch, [:items]} = safe_verify(no_types)
 
       no_values = put_u16(bin, vt_pos + @items_value_slot, 0)
-      assert {:error, {:union_vector_presence_mismatch, :items}} = safe_verify(no_values)
+      assert {:error, :union_vector_presence_mismatch, [:items]} = safe_verify(no_values)
     end
   end
 end

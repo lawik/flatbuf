@@ -209,7 +209,7 @@ defmodule Flatbuf.DeprecatedFieldTest do
       <<pre::binary-size(field_pos), _::32, post::binary>> = bin
       corrupt = pre <> <<0xFFFFFFFF::little-32>> <> post
 
-      assert {:error, _} = DepGone.T.verify(corrupt)
+      assert {:error, _, _} = DepGone.T.verify(corrupt)
     end
   end
 

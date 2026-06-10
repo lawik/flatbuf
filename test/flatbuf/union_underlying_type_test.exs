@@ -218,7 +218,8 @@ defmodule Flatbuf.UnionUnderlyingTypeTest do
         {:ok, bin} = UUTInt.D.encode(%{test_union: {:A, %{a: 42}}})
         corrupted = patch_unique!(bin, <<555::little-signed-32>>, <<999::little-signed-32>>)
 
-        assert {:error, {:unknown_union_variant, 999}} = UUTInt.D.verify(corrupted)
+        assert {:error, {:unknown_union_variant, 999}, [:test_union]} =
+                 UUTInt.D.verify(corrupted)
       end
 
       test "a corrupted types-vector element is rejected by verify" do
@@ -230,7 +231,9 @@ defmodule Flatbuf.UnionUnderlyingTypeTest do
 
         corrupted = patch_unique!(bin, <<666::little-signed-32>>, <<999::little-signed-32>>)
 
-        assert {:error, {:unknown_union_variant, 999}} = UUTInt.D.verify(corrupted)
+        # The B element sits at index 1; the path pins it.
+        assert {:error, {:unknown_union_variant, 999}, [:test_vector_of_union, 1]} =
+                 UUTInt.D.verify(corrupted)
       end
     end
 
@@ -283,7 +286,8 @@ defmodule Flatbuf.UnionUnderlyingTypeTest do
         {:ok, bin} = UUTLong.D.encode(%{test_union: {:B, %{b: "neg"}}})
         corrupted = patch_unique!(bin, <<-7::little-signed-64>>, <<12_345::little-signed-64>>)
 
-        assert {:error, {:unknown_union_variant, 12_345}} = UUTLong.D.verify(corrupted)
+        assert {:error, {:unknown_union_variant, 12_345}, [:test_union]} =
+                 UUTLong.D.verify(corrupted)
       end
     end
 
