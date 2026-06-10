@@ -3,9 +3,10 @@
 Pure-Elixir [FlatBuffers](https://flatbuffers.dev). Schemas compile to
 plain `.ex` files — generate, commit, drop the dep.
 
-> Status: alpha. Round-trips the upstream `flatc` test corpus; design
-> and spec coverage live in [`SPEC.md`](SPEC.md), known gaps in
-> [Limitations](#limitations).
+> Status: alpha. Decodes the upstream `flatc` test corpus and the
+> encoders are differentially tested against `flatc` across the
+> feature matrix; design and spec coverage live in
+> [`SPEC.md`](SPEC.md), known gaps in [Limitations](#limitations).
 
 ## Install
 
@@ -42,6 +43,13 @@ json       = MyApp.Schema.Monster.to_json(m)
 Every table also gets `encode_size_prefixed/1` + friends, `decode_at/2`,
 `build/2` for nested-buffer assembly, and per-field accessors.
 
+`--niceties behaviour` and `--niceties jason` opt into
+`@behaviour Flatbuf.Table` / `@derive Jason.Encoder` on generated
+modules. Both add a compile-time requirement to *your* project:
+`jason` needs `:jason` in your deps, and `behaviour` needs `:flatbuf`
+available wherever the generated code compiles (so not with the
+dev/test-only dep line above). The default output is dependency-free.
+
 Regenerate on build by adding `:flatbuf` to `compilers:` and configuring
 schemas under `config :my_app, :flatbuf, schemas: [...]`. `mix
 flatbuf.gen.check` is the CI gate. `mix help flatbuf.gen` has the flags.
@@ -49,9 +57,10 @@ flatbuf.gen.check` is the CI gate. `mix help flatbuf.gen` has the flags.
 ## Limitations
 
 - 64-bit offsets / `(vector64)` — parsed but encoded as 32-bit.
-- Optional-scalar presence — `= null` decodes to `nil`, but absent and
-  explicit-zero look the same on the wire.
-- `force_align` on tables — works for structs and vectors, not table soffsets.
+- `force_align` on tables — ignored (as `flatc` does); honored on
+  structs and vectors.
+- Union underlying types (`union U : int32 { ... }`) — not supported,
+  parse error.
 - `rpc_service` — parsed, no client/server codegen.
 - `to_json/1` f32 strings — same bits as flatc, longer decimals.
 - FNV-64 hashes follow the spec but aren't differentially tested against flatc.

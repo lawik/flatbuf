@@ -1,5 +1,22 @@
 # Library review — 2026-06-09
 
+> **Resolution status (2026-06-10):** the findings below were worked
+> through in four streams (wire correctness, schema front-end,
+> tooling/packaging, encode-oracle suite) merged the following day.
+> Fixed: C1–C5, the resolver validation layer, the lexer crashes and
+> escape gaps, `root_type` lookup, `:nstandard` packaging, niceties
+> validation, manifest robustness, fresh-clone-green tests, CI
+> workflows, the encode-direction oracle suite, and the SPEC/README/
+> CHANGELOG drift. Full suite: 365 tests / 0 failures (264 offline);
+> all gates clean. Still open (tracked in QUALITY.md): property-based
+> tests, verifier error paths/configurable depth + alignment checks
+> (documented deviation), 3 pinned upstream fixtures
+> (alignment_test / evolution_v1 / test_64bit), union underlying
+> types, dedicated `deprecated`/`file_extension` tests, `elixir:
+> "~> 1.19"` kept deliberately (formatter-version stability for
+> `flatbuf.gen.check`). The text below is the unedited point-in-time
+> review.
+
 A quality / completeness / sanity review of `flatbuf` at f374490. Method:
 re-ran every quality gate locally, deep-read all of `lib/`, the test
 suite, and the docs, and live-reproduced the headline bugs against

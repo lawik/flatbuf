@@ -41,7 +41,7 @@ This document is the working spec. It exists to (a) lock the architectural shape
 
 Five layers, with a clean cut between each:
 
-1. **Parser** (`Flatbuf.Schema.Parser`) — `.fbs` text → concrete syntax tree. Built on `nimble_parsec`. No semantic checks at this layer.
+1. **Parser** (`Flatbuf.Schema.Parser`) — `.fbs` text → concrete syntax tree. A hand-written lexer plus recursive-descent parser (no parser-combinator dependency). No semantic checks at this layer.
 2. **Resolver** (`Flatbuf.Schema.Resolver`) — CST → fully-resolved IR. Resolves `include` statements, namespaces, name references, attribute validation, default-value typing, vtable slot assignment, enum value computation, union variant tagging. Produces a `%Flatbuf.Schema{}` value that is the single source of truth for codegen.
 3. **Codegen** (`Flatbuf.Codegen.*`) — IR → strings of Elixir source. Subdivided per emitted artifact: `Codegen.Table`, `Codegen.Struct`, `Codegen.Enum`, `Codegen.Union`, `Codegen.Wire`. No I/O here.
 4. **Mix integration** (`Mix.Tasks.Flatbuf.Gen`, `Mix.Tasks.Compile.Flatbuf`) — finds schema files, calls the pipeline, writes `.ex` files, manages caching/manifest so unchanged schemas don't re-emit.
@@ -55,7 +55,7 @@ The defining constraint: **emitted code is self-contained**.
 
 **What the generated code references:**
 - Standard library only (`Bitwise`, binary syntax, `:erlang`).
-- A single generated helper module — by default `<RootNamespace>.Flatbuf.Wire` — containing primitive read/write operations on binaries. This module is itself emitted as a `.ex` file, owned by the user's project, regenerated when its (very stable) source template changes.
+- A single generated helper module — `Flatbuf.Generated.Wire` unless overridden with `--wire-module` — containing primitive read/write operations on binaries. This module is itself emitted as a `.ex` file, owned by the user's project, regenerated when its (very stable) source template changes.
 - Nothing from `:flatbuf`. Not even an `alias`. A user can delete `:flatbuf` from their deps and the generated code keeps compiling and running.
 
 **What lives in `:flatbuf` and never leaves it:**
@@ -63,12 +63,12 @@ The defining constraint: **emitted code is self-contained**.
 - The verifier generator (because it's part of codegen).
 - The optional protocols and behaviours described below.
 
-**Opt-in runtime niceties** (configured per-project, default off):
-- `Flatbuf.Encoder` / `Flatbuf.Decoder` protocols — generic dispatch for "encode anything that conforms" / "decode into this module."
+**Opt-in runtime niceties** (configured per generator run, default off):
 - `Flatbuf.Table` behaviour — `@callback decode(binary) :: {:ok, struct} | {:error, term}` plus encode/verify. Lets external tooling enumerate flatbuffer types by `Code.ensure_loaded?/1` + `function_exported?/3`.
-- `Jason.Encoder` / `Inspect` protocol implementations for generated structs.
+- `Jason.Encoder` derivation for generated structs (requires the consumer to depend on `:jason`).
+- (Future, unimplemented: `Flatbuf.Encoder` / `Flatbuf.Decoder` protocols for generic dispatch, and an `Inspect` impl.)
 
-When enabled, generated modules `use Flatbuf.Table` etc., which brings in the dependency. When disabled (default), the generated code is pristine and dep-free. This must be controllable per-schema-file as well as globally, so a project can keep its data-interchange types dep-free while opting in for human-facing types.
+When enabled, generated modules get `@behaviour Flatbuf.Table` / `@derive Jason.Encoder`, which adds the corresponding compile-time dependency. When disabled (default), the generated code is pristine and dep-free. Niceties currently apply to the whole generator run; per-schema-file control is a future refinement.
 
 ## 5. Public API surface
 
@@ -79,13 +79,12 @@ mix flatbuf.gen SCHEMA.fbs [SCHEMA.fbs ...] [--out PATH] [--namespace NAME]
                            [--niceties protocols,behaviours]
                            [--wire-module NAME] [--force]
 
-mix flatbuf.gen.clean         # remove all files in the manifest
 mix flatbuf.gen.check         # exit nonzero if regeneration would change files (for CI)
 ```
 
-A `Mix.Tasks.Compile.Flatbuf` compiler is also provided for users who don't want to check generated code in: register `compilers: [:flatbuf | Mix.compilers()]` in `mix.exs` and configure schema paths in `config :flatbuf`.
+A `Mix.Tasks.Compile.Flatbuf` compiler is also provided for users who don't want to check generated code in: register `compilers: [:flatbuf | Mix.compilers()]` in `mix.exs` and configure schema paths under `config :my_app, :flatbuf`.
 
-Both paths share a manifest file (`_build/<env>/lib/<app>/.mix/compile.flatbuf`) tracking the schema hash → emitted file list, so regeneration is incremental and stale outputs get cleaned up.
+The compiler keeps a manifest file (`_build/<env>/lib/<app>/.mix/compile.flatbuf`) tracking the schema hash → emitted file list; writes are gated on content changes and stale outputs get cleaned up. `mix flatbuf.gen` is manifest-free — it writes what you ask for and renames leave old files behind (use the compiler if you want stale-output cleanup).
 
 ### 5.2 Shape of generated modules
 
@@ -135,10 +134,10 @@ For builders, the generated module exposes both a high-level `encode/1` and a lo
 
 ### 6.1 Schema parser — `Flatbuf.Schema.Parser`
 
-`.fbs` grammar, per the upstream reference (`flatbuffers/docs/source/Schemas.md` and `flatbuffers/src/idl_parser.cpp`). Lexer + `nimble_parsec` grammar.
+`.fbs` grammar, per the upstream reference (`flatbuffers/docs/source/Schemas.md` and `flatbuffers/src/idl_parser.cpp`). Hand-written lexer + recursive-descent parser.
 
 Tokens:
-- Identifiers, integer literals (decimal, hex `0x`, binary `0b`, octal), float literals (incl. `nan`, `inf`, `-inf`), string literals (escape sequences per JSON), boolean literals, `null`.
+- Identifiers, integer literals (decimal, hex `0x`, binary `0b`; leading-zero literals are decimal, matching `flatc` 25.x), float literals (incl. `nan`, `inf`, `-inf`, leading/trailing-dot forms), string literals (JSON escapes incl. `\uXXXX` with surrogate pairs, plus `\xHH`), boolean literals, `null`. Malformed and non-UTF-8 input produce tagged errors, never exceptions.
 - Reserved keywords: `table`, `struct`, `enum`, `union`, `namespace`, `root_type`, `attribute`, `file_identifier`, `file_extension`, `include`, `rpc_service`, `true`, `false`, `null`.
 
 Productions:
@@ -166,7 +165,7 @@ Walks the CST and produces a normalized `%Flatbuf.Schema{}`. Responsibilities:
 - **Default value typing.** A `= 100` on a `short` field is typed as i16; on a `float` field as f32; on an enum field as a variant. Validation of representability.
 - **Enum value computation.** Implicit increment from previous, hex literal support, `bit_flags` attribute mode (powers of two).
 - **Union variant tagging.** Each variant gets a `u8` discriminator (1..255; 0 is `NONE`). Union fields in tables expand into two vtable slots: the type byte and the value offset.
-- **Attribute validation.** Built-in attributes are recognized and type-checked: `id`, `deprecated`, `required`, `force_align`, `bit_flags`, `nested_flatbuffer`, `flexbuffer`, `key`, `shared`, `hash`, `original_order`, `native_type`, `native_default`, `native_inline`, `cpp_type`, `cpp_str_type`, `cpp_str_flex_ctor`, `csharp_partial`, `private`, `streaming`, `idempotent`. User-declared attributes are passed through unchecked.
+- **Attribute validation.** Semantically load-bearing attributes are validated: `id` (all-or-none, consecutive, unions take two), `required` (rejected on scalars), `force_align` (power of two, within bounds), `bit_flags` (shift range), `hash`, `key`, `shared`, `nested_flatbuffer`, `deprecated`. Language-binding attributes (`native_*`, `cpp_*`, `csharp_partial`, `private`, `streaming`, `idempotent`, ...) and user-declared attributes are passed through unchecked.
 - **Struct layout.** Compute field offsets and total size with the FlatBuffers alignment rules (each field aligned to its natural size; struct aligned to its largest member; `force_align` overrides).
 - **Root type, file identifier, file extension.** Stored on the schema record.
 
@@ -219,15 +218,16 @@ Same module template every project. We do not inline these helpers into each tab
 
 Generated alongside the reader. For each table, walks every field that has an offset (strings, vectors, sub-tables, unions, nested flatbuffers) and checks:
 
-1. The offset's target is within the buffer.
-2. The target is aligned correctly for its type.
-3. For vectors: the length is sane (`length * elem_size + 4 <= buffer_end - vec_offset`) and elements are alignment-checked.
-4. For strings: the null terminator is present after the length-counted bytes, and the byte slice is within bounds.
-5. For unions: the discriminator selects a variant we know, and the variant's offset is verified per its type.
-6. For sub-tables: recurse, with a depth limit (configurable, default 64) and a visited-set to break cycles. Cycles in well-formed flatbuffers are unusual but a malicious buffer can produce them, and unbounded recursion is a DoS.
-7. For `required` fields: the vtable slot is non-zero.
+1. The offset's target is within the buffer, including inline fields: every present vtable slot (scalar, enum, inline struct, union discriminator) is checked against the table's inline area.
+2. For vectors: the length is sane (`length * elem_size + 4 <= buffer_end - vec_offset`).
+3. For strings: the null terminator is present after the length-counted bytes, and the byte slice is within bounds.
+4. For unions: the discriminator selects a variant we know, and the variant's offset is verified per its type. Vector-of-union fields must have both parallel vectors present with equal element counts.
+5. For sub-tables: recurse, with a depth limit (64). uoffsets are forward-only on this wire, so true cycles cannot occur; the depth limit bounds recursion on adversarial chains.
+6. For `required` fields: the vtable slot is non-zero.
 
-Verifier errors are returned as `{:error, {:invalid_offset | :length_overflow | ...}, path}` so callers can locate the failure.
+Deliberate deviation: the verifier does not alignment-check targets. Misaligned reads are safe on the BEAM (no faults, no UB); a buffer we accept could in principle be rejected by a stricter C++ verifier, but nothing we *emit* is misaligned.
+
+Verifier errors are returned as flat tagged tuples, e.g. `{:error, {:inline_field_out_of_bounds, voffset, len, inline_size}}`. (A path to the failing field, e.g. `[:monster, :inventory, 3]`, is a future refinement.)
 
 ### 6.6 Object API (decode/encode of structs)
 
@@ -242,7 +242,7 @@ Decoding policy:
 - Unions decode to `{variant_module, decoded}` tuples.
 - Enums decode to atoms when defined as a closed set; numeric otherwise (e.g. `bit_flags` set).
 
-Encoding accepts maps for ergonomics — users don't have to construct the struct first. Unknown keys are an error; missing keys take defaults. Encoding validates `required` presence and scalar ranges before writing.
+Encoding accepts maps for ergonomics — users don't have to construct the struct first. Unknown keys are ignored; missing keys take defaults. Encoding validates `required` presence and scalar ranges/types before writing, returning tagged error tuples.
 
 ### 6.7 JSON converter
 
@@ -389,15 +389,15 @@ Deliverables:
 
 The library is correct iff `flatc` says it is. Concretely:
 
-1. **Vendored corpus.** `flatbuffers/tests/monster_test.fbs`, `monsterdata_test.json`, `monsterdata_test.mon`, `optional_scalars.fbs`, `union_vector/`, and the schemas under `tests/include_test/`. Pulled in as a git submodule under `test/fixtures/upstream/` and pinned to a release tag.
-2. **`flatc` as oracle.** Pin a release in `Dockerfile.test` (and document local install). Tests shell out via `System.cmd/3`. Two directions:
-   - Elixir encode → `flatc --json --raw-binary` → compare JSON to the source.
-   - `flatc --binary` → Elixir decode → compare against the source JSON.
+1. **Upstream corpus.** The `flatbuffers` test schemas and binaries, fetched by `mix flatbuf.fetch_fixtures` as a shallow sparse clone into the gitignored `test/fixtures/upstream/`, pinned to a release tag. Without the corpus, `mix test` runs the offline subset and prints a notice; CI runs both profiles.
+2. **`flatc` as oracle.** The matching `flatc` release is auto-downloaded per platform by `mix flatbuf.fetch_flatc` (override with `$FLATBUF_FLATC`). Tests shell out via `System.cmd/3`. Two directions, both covered:
+   - Elixir encode → `flatc --json --raw-binary` → compare JSON to the source (the encode-oracle suite spans the feature matrix: scalars, strings, vectors, structs, fixed arrays, enums/bit_flags, unions incl. vectors, nesting, file identifiers, size prefixes, key sorting, shared strings, force_align).
+   - `flatc --binary` → Elixir decode → compare against the source JSON (the fixture round-trip suite over the upstream corpus, including buffers produced by other language ports).
 3. **Byte-exact comparison is opt-in only.** Vtable layout and string interning are implementation-defined. Default to semantic (JSON-level) comparison; mark byte-exact tests explicitly when the layout is deterministic.
-4. **Property-based tests.** StreamData generators driven by the schema IR — given a schema, produce arbitrary valid data, then round-trip through every direction (Elixir-encode/Elixir-decode, Elixir-encode/flatc-decode, flatc-encode/Elixir-decode). Catches encoder/decoder asymmetry.
+4. **Property-based tests.** *Planned, not yet implemented.* StreamData generators driven by the schema IR — given a schema, produce arbitrary valid data, then round-trip through every direction. Catches encoder/decoder asymmetry beyond the hand-picked oracle cases.
 5. **Reflection self-test.** Parse `reflection.fbs` with our parser, generate Elixir for it, then have our parser parse `monster_test.fbs`, emit a `reflection.fbs`-shaped binary using our generated `reflection.fbs` codec, and ask our generated codec to decode it. Closes the loop on both parser and codegen.
-6. **Verifier fuzz.** Custom corpus — truncated buffers, oob offsets, cyclic offsets, oversized lengths, misaligned offsets, vtables claiming sizes past buffer end. Every input must return an error, never crash or read OOB. Run under `:erlang.trace/3` to assert no `badarith`/`badarg` raised from `binary_part/3`.
-7. **Snapshot tests on generated source.** `mix flatbuf.gen` over a fixed schema set produces stable output. We snapshot the emitted `.ex` files and diff in CI. Catches accidental codegen drift.
+6. **Verifier fuzz.** Custom corpus — truncated buffers, oob offsets, oversized lengths, byte flips, vtables claiming sizes past buffer end. Every input must return `:ok` or an error tuple, never crash or read OOB (asserted with plain rescue/catch around `verify/1`).
+7. **Codegen drift.** `mix flatbuf.gen.check` fails CI when regenerating committed output would change it, and a formatter-idempotency test pins the emitted style. (Golden-file snapshots of generated source remain a possible addition.)
 
 ## 11. Open design questions
 

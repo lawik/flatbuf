@@ -4,18 +4,40 @@
 
 ### Added
 
+- Encode-direction differential suite: buffers produced by the
+  generated encoders are now verified against `flatc` across the
+  feature matrix (scalars, strings, vectors, structs, fixed arrays,
+  enums/bit_flags, unions incl. vectors of unions, nesting,
+  file identifiers, size prefixes, key sorting, shared strings,
+  force_align). Previously only the decode direction was covered.
+- Schema validation in the resolver, mirroring `flatc` semantics:
+  duplicate field/variant names, explicit `(id: N)` rules
+  (all-or-none, consecutive from 0, unions take two ids), default
+  value typing and range checks, enum value ranges (incl. `bit_flags`
+  shifts), `required` rejected on scalar fields, `force_align`
+  power-of-two/bounds checks, fixed arrays restricted to structs,
+  union variant cap (255), empty structs and struct defaults
+  rejected, nested vectors rejected. Errors carry the offending name
+  and source line.
+- Lexer: `\b`, `\f`, `\/`, `\uXXXX` (with surrogate pairs) and
+  `\xHH` string escapes; `.5`/`1.` float literals; malformed or
+  non-UTF-8 input returns tagged errors instead of raising.
+- `root_type` now resolves with the same lookup rules `flatc` uses
+  (name-as-written first, then current-namespace-qualified).
+- GitHub Actions CI: lint, offline test, full-corpus test (fixtures
+  and `flatc` cached), and dialyzer jobs.
 - `Mix.Tasks.Compile.Flatbuf` — a Mix compiler that regenerates `.ex`
   files from configured `.fbs` schemas on every `mix compile`. Wire
   it in with `compilers: [:flatbuf | Mix.compilers()]` and configure
-  schemas under `config :my_app, :flatbuf`. Incremental via a
-  per-build manifest; drops stale outputs when schemas are removed
-  from config.
+  schemas under `config :my_app, :flatbuf`. A per-build manifest
+  gates writes (unchanged outputs aren't rewritten) and drops stale
+  outputs when schemas are removed from config.
 - `mix flatbuf.gen.check` — CI gate that exits non-zero if running
   the gen pipeline would change any committed file.
 - `Flatbuf.Table` behaviour and `--niceties` opt-in for generated
   root tables. `--niceties behaviour` attaches the behaviour;
-  `--niceties jason` derives `Jason.Encoder` on the struct. Default
-  remains dependency-free.
+  `--niceties jason` derives `Jason.Encoder` on the struct (the
+  consumer must depend on `:jason`). Default remains dependency-free.
 - File identifier emission. When a schema declares
   `file_identifier "XXXX";`, the root encode helpers write the
   4-byte marker into the buffer header, and `file_identifier/0`
@@ -46,6 +68,41 @@
 
 ### Fixed
 
+- Scalar values are validated on the encode path. Out-of-range or
+  wrong-typed values used to be silently truncated into the wire
+  (`encode(%{a: 70_000})` on a `ushort` produced `4464`); they now
+  return `{:error, {:scalar_out_of_range | :invalid_scalar, field,
+  kind, value}}`. Covers table fields, vectors, struct members,
+  fixed arrays, enum underlying values, and hash fields.
+- Optional scalar/enum fields (`= null`) no longer crash `encode/1`
+  when absent, and explicitly-passed type-default values (`0`,
+  `false`, first enum variant) are now written instead of dropped —
+  absence and explicit defaults are distinguishable on the wire.
+- The verifier bounds-checks inline fields (scalars, enums, inline
+  structs, union discriminators) against the table's inline area. A
+  crafted vtable could previously direct reads past the buffer while
+  `verify/1` returned `:ok`.
+- Vector-of-union verification checks both parallel vectors,
+  requires equal element counts
+  (`{:error, {:union_vector_count_mismatch, ...}}`), and no longer
+  raises on count-inflated buffers.
+- `nil` (NONE) elements in vectors of unions encode as
+  discriminator 0 / offset 0 (the layout `flatc`'s binary layer
+  accepts) instead of raising `ArithmeticError`; decode yields `nil`.
+- A table whose only depth-recursing field is a vector of unions
+  generated a `__verify_at__/3` that failed to compile.
+- `:nstandard` was an unconditional runtime dependency; it is now
+  dev/test-only, so consumers pull no transitive deps from
+  `:flatbuf`.
+- Unknown `--niceties` values (e.g. `behavior`) raised silently no
+  effect; they are now rejected with the valid values listed.
+- `Mix.Tasks.Compile.Flatbuf` tolerates a corrupted manifest,
+  reports a missing `:schemas` config key with a friendly message,
+  and no longer rewrites byte-identical artifacts (and their mtimes)
+  when an unrelated schema changes.
+- A fresh clone's `mix test` is green: corpus-gated smoke tests skip
+  (instead of failing) with a notice pointing at
+  `mix flatbuf.fetch_fixtures` / `mix flatbuf.fetch_flatc`.
 - Codegen crashed with a `CaseClauseError` on enum types declared
   with no variants (e.g. `enum Foo : int {}`).
 
