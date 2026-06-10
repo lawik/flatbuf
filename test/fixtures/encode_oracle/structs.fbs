@@ -1,0 +1,40 @@
+// Encode-oracle fixture: structs with mixed-width fields (alignment
+// padding), nested structs, force_align on a struct, and a vector of
+// structs. The single ubyte `tag` field perturbs inline placement so
+// misaligned struct writes would show up as garbage in flatc's output.
+
+namespace EncOracle.Structs;
+
+struct Vec3 {
+  x: float;
+  y: float;
+  z: float;
+}
+
+struct Mixed {
+  a: byte;
+  b: long;
+  c: ushort;
+}
+
+struct Nested {
+  id: ubyte;
+  pos: Vec3;
+  m: Mixed;
+}
+
+struct Big (force_align: 16) {
+  v: long;
+  w: int;
+}
+
+table Holder {
+  tag: ubyte;
+  p: Vec3;
+  mix: Mixed;
+  n: Nested;
+  big: Big;
+  vs: [Vec3];
+}
+
+root_type Holder;

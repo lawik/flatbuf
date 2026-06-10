@@ -1,0 +1,25 @@
+// Encode-oracle fixture: a union with a table variant, a struct
+// variant, and an (aliased) string variant — flatc requires an alias
+// for string members — plus a field left as NONE.
+
+namespace EncOracle.Unions;
+
+table Sword {
+  dmg: short;
+}
+
+struct Pos {
+  x: float;
+  y: float;
+}
+
+union Thing { Sword, Pos, Words: string }
+
+table Holder {
+  first: Thing;
+  second: Thing;
+  third: Thing;
+  fourth: Thing;
+}
+
+root_type Holder;

@@ -1,0 +1,22 @@
+// Encode-oracle fixture: (key) attribute — vectors of tables sorted by
+// a string key and by a numeric key. Encoders must sort before
+// writing; flatc's JSON output reveals the wire order.
+
+namespace EncOracle.Keys;
+
+table Word {
+  name: string (key);
+  v: int;
+}
+
+table Num {
+  id: ushort (key);
+  v: int;
+}
+
+table Index {
+  words: [Word];
+  nums: [Num];
+}
+
+root_type Index;

@@ -1,0 +1,29 @@
+// Encode-oracle fixture: vector of unions with mixed variants
+// (two table variants and a string variant). NONE/nil elements are
+// deliberately not exercised here — see REVIEW C5 (encode crash).
+
+namespace EncOracle.UnionVec;
+
+table Sword {
+  dmg: short;
+}
+
+table Bow {
+  range: short;
+}
+
+union Thing { Sword, Bow, Words: string }
+
+table Holder {
+  label: string;
+  things: [Thing];
+  // Unused in tests; present only because a table whose sole
+  // depth-recursing field is a vector of unions currently generates
+  // uncompilable verifier code (recurses_field?/1 in
+  // lib/flatbuf/codegen/table.ex has no {:vector, {:union, _}} clause
+  // while the union-vector verify clause references `depth`). A
+  // skipped test in encode_oracle_test.exs pins that bug.
+  bonus: Sword;
+}
+
+root_type Holder;

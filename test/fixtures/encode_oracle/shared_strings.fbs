@@ -1,0 +1,17 @@
+// Encode-oracle fixture: (shared) strings — identical values are
+// deduplicated on the wire (one string body, many uoffsets) and must
+// still decode correctly via flatc.
+
+namespace EncOracle.SharedStr;
+
+table Entry {
+  label: string (shared);
+  note: string;
+}
+
+table Board {
+  entries: [Entry];
+  motto: string (shared);
+}
+
+root_type Board;

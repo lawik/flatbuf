@@ -1,0 +1,13 @@
+// Encode-oracle fixture: strings (UTF-8 multibyte, empty string) and
+// vectors of strings.
+
+namespace EncOracle.Strings;
+
+table Doc {
+  title: string;
+  empty: string;
+  uni: string;
+  tags: [string];
+}
+
+root_type Doc;

@@ -1,0 +1,18 @@
+// Encode-oracle fixture: enums with explicit non-contiguous values, a
+// bit_flags enum on a 2-byte base type (combined flags), an enum field
+// left at its non-zero default, and a vector of enums.
+
+namespace EncOracle.Enums;
+
+enum Color : byte { Red = 1, Green = 2, Blue = 8 }
+
+enum Flags : ushort (bit_flags) { A, B, C, D }
+
+table Painted {
+  c: Color = Green;
+  c_default: Color = Green;
+  f: Flags;
+  palette: [Color];
+}
+
+root_type Painted;
