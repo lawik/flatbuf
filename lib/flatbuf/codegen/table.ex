@@ -57,6 +57,7 @@ defmodule Flatbuf.Codegen.Table do
     always_emit_keys = always_emit_keys(t)
     required_check = build_required_check(t)
     file_id_funs = build_file_identifier_funs(schema.file_identifier)
+    file_ext_funs = build_file_extension_funs(schema.file_extension)
     behaviour_decl = build_behaviour_decl(niceties)
     derives = build_derive_attrs(niceties)
 
@@ -74,7 +75,7 @@ defmodule Flatbuf.Codegen.Table do
       @moduledoc "Generated from FlatBuffers table #{t.name}. Do not edit."
 
       alias #{inspect(wire_module)}, as: Wire
-    #{behaviour_decl}#{file_id_funs}
+    #{behaviour_decl}#{file_id_funs}#{file_ext_funs}
     #{derives}  defstruct #{defstruct_fields}
       @type t :: #{type_spec}
     #{encode_funs}#{json_top}
@@ -737,6 +738,26 @@ defmodule Flatbuf.Codegen.Table do
     """
   end
 
+  # Mirrors `file_identifier/0`: emitted only when the schema declares
+  # a `file_extension`, absent otherwise. Purely informational — the
+  # extension never appears on the wire; it's the conventional file
+  # suffix for buffers of this schema (flatc uses it to name `--binary`
+  # output, defaulting to ".bin").
+  defp build_file_extension_funs(nil), do: ""
+
+  defp build_file_extension_funs(ext) when is_binary(ext) do
+    """
+
+      @doc \"\"\"
+      The `file_extension` this schema declares: the conventional file
+      suffix (without the dot) for buffers rooted in this schema. It is
+      metadata only and never written into the buffer.
+      \"\"\"
+      @spec file_extension() :: binary()
+      def file_extension, do: #{inspect(ext)}
+    """
+  end
+
   # -----------------------------------------------------------------------
   # Required-field enforcement (encode side)
   # -----------------------------------------------------------------------
@@ -764,8 +785,15 @@ defmodule Flatbuf.Codegen.Table do
   end
 
   defp build_required_check(%Table{fields: fields}) do
+    # A field that is both `required` and `deprecated` is not enforced:
+    # the encoder never writes deprecated slots, so demanding a value
+    # we'd then throw away would make the table impossible to encode.
+    # flatc's generated code drops the required check together with
+    # the field.
     required =
-      Enum.filter(fields, fn f ->
+      fields
+      |> reject_deprecated()
+      |> Enum.filter(fn f ->
         Map.get(f.attributes, :required) == true and field_can_be_required?(f.type)
       end)
 
@@ -801,9 +829,19 @@ defmodule Flatbuf.Codegen.Table do
   # Encode (build into existing builder)
   # -----------------------------------------------------------------------
 
+  defp reject_deprecated(fields) do
+    Enum.reject(fields, &Map.get(&1.attributes, :deprecated, false))
+  end
+
   defp build_encode_build(t, schema) do
-    {prelude_lines, addrs_per_field} = build_subobject_prelude(t, schema)
-    field_add_lines = build_field_adds(t, schema, addrs_per_field)
+    # `(deprecated)` fields are skipped on the encode side (SPEC:
+    # "skip in encode, accept in decode"), matching flatc's generated
+    # builders, which emit no setter for them. The remaining fields
+    # keep their id-derived vtable slots, so the deprecated slot stays
+    # reserved on the wire — it's simply never written.
+    live = %{t | fields: reject_deprecated(t.fields)}
+    {prelude_lines, addrs_per_field} = build_subobject_prelude(live, schema)
+    field_add_lines = build_field_adds(live, schema, addrs_per_field)
 
     """
         b = builder
@@ -1238,7 +1276,7 @@ defmodule Flatbuf.Codegen.Table do
   defp always_emit_keys(t) do
     keys =
       t.fields
-      |> Enum.reject(&Map.get(&1.attributes, :deprecated, false))
+      |> reject_deprecated()
       |> Enum.filter(fn f -> f.default == :null end)
       |> Enum.map(fn f -> Atom.to_string(f.name) end)
 
@@ -1259,6 +1297,13 @@ defmodule Flatbuf.Codegen.Table do
   defp recurses_field?(_), do: false
 
   defp build_verify_at(t, schema) do
+    # Deprecated fields keep their per-field content clause: our
+    # decoder still reads them when present, so the verifier must
+    # cover everything decode dereferences. Only the *required*
+    # enforcement is dropped (below) — our own encoder never writes
+    # deprecated slots, so a required-and-deprecated field would
+    # otherwise reject every buffer we produce. flatc's generated
+    # verifier likewise skips the check for deprecated fields.
     field_clauses =
       t.fields
       |> Enum.map(fn f -> verify_field(f, schema) end)
@@ -1266,6 +1311,7 @@ defmodule Flatbuf.Codegen.Table do
 
     required_clauses =
       t.fields
+      |> reject_deprecated()
       |> Enum.filter(fn f -> Map.get(f.attributes, :required) == true end)
       |> Enum.map(&verify_required_field/1)
 
@@ -1490,10 +1536,13 @@ defmodule Flatbuf.Codegen.Table do
   defp build_to_json_map(t, schema) do
     t.fields
     # `(deprecated)` fields are intentionally dropped from JSON
-    # output — flatc does this, so matching means our output stays
-    # comparable across binaries that include those slots in the
-    # vtable for backwards compatibility.
-    |> Enum.reject(&Map.get(&1.attributes, :deprecated, false))
+    # output: to_json reflects what encode/1 would write, and flatc's
+    # *generated* readers can't see deprecated fields at all. Note
+    # that flatc's schema-driven `flatc --json` tool diverges here —
+    # probed at 25.12.19, it prints a deprecated field whenever the
+    # buffer physically contains the slot (and its JSON parser will
+    # happily accept and write one, too).
+    |> reject_deprecated()
     |> Enum.map_join("", fn f ->
       key = inspect(Atom.to_string(f.name))
       val = "Map.get(value, #{inspect(f.name)})"
