@@ -11,6 +11,8 @@ defmodule Flatbuf.Gen do
   alias Flatbuf.Codegen
   alias Flatbuf.Schema.Resolver
 
+  @known_niceties [:behaviour, :jason]
+
   @type artifact :: %{module: module(), source: String.t(), path: Path.t()}
 
   @type plan_options :: [
@@ -25,8 +27,9 @@ defmodule Flatbuf.Gen do
   Resolve each schema path, generate artifacts for the entire set, and
   return a list keyed by absolute output path.
 
-  Duplicate module names across schemas are collapsed (last writer
-  wins). Returns `{:ok, [artifact]}` or the first resolver error.
+  Duplicate module names across schemas are collapsed (the first
+  schema to emit a module wins). Returns `{:ok, [artifact]}` or the
+  first resolver error.
   """
   @spec plan([Path.t()], plan_options()) ::
           {:ok, [artifact()]} | {:error, term()}
@@ -68,9 +71,19 @@ defmodule Flatbuf.Gen do
   end
 
   @doc """
+  The niceties the code generator knows about.
+  """
+  @spec known_niceties() :: [atom()]
+  def known_niceties(), do: @known_niceties
+
+  @doc """
   Parse a comma-separated nicety list (`"behaviour,jason"`) into a list
   of atoms. `nil` returns `[]` so this can be used directly on
   `OptionParser` output.
+
+  Raises `ArgumentError` for names outside `known_niceties/0`, so a
+  typo (`--niceties behavior`) fails loudly instead of silently doing
+  nothing.
   """
   @spec parse_niceties(nil | String.t()) :: [atom()]
   def parse_niceties(nil), do: []
@@ -78,7 +91,34 @@ defmodule Flatbuf.Gen do
   def parse_niceties(str) when is_binary(str) do
     str
     |> String.split(",", trim: true)
-    |> Enum.map(&(&1 |> String.trim() |> String.to_atom()))
+    |> Enum.map(&parse_nicety!(String.trim(&1)))
+  end
+
+  defp parse_nicety!(name) do
+    Enum.find(@known_niceties, &(Atom.to_string(&1) == name)) ||
+      raise ArgumentError,
+            "unknown nicety #{inspect(name)}; valid niceties: #{known_niceties_string()}"
+  end
+
+  @doc """
+  Validate a list of nicety atoms (the `niceties:` config form used by
+  `compile.flatbuf`). Returns the list unchanged, or raises
+  `ArgumentError` naming the unknown entries and the valid set.
+  """
+  @spec validate_niceties!([atom()]) :: [atom()]
+  def validate_niceties!(niceties) when is_list(niceties) do
+    case Enum.reject(niceties, &(&1 in @known_niceties)) do
+      [] ->
+        niceties
+
+      unknown ->
+        raise ArgumentError,
+              "unknown niceties #{inspect(unknown)}; valid niceties: #{known_niceties_string()}"
+    end
+  end
+
+  defp known_niceties_string() do
+    Enum.map_join(@known_niceties, ", ", &Atom.to_string/1)
   end
 
   @doc """

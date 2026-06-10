@@ -1,0 +1,163 @@
+# CI for flatbuf.
+#
+# Four jobs:
+#
+#   lint          — compile (warnings as errors), formatting, credo.
+#   test-offline  — `mix test` with NO corpus: proves a fresh clone is green.
+#   test-full     — fetches the pinned upstream corpus + flatc binary
+#                   (both cached) and runs the full suite.
+#   dialyzer      — success typing, with the PLT cached.
+#
+# The corpus/flatc release tag below must match the @tag pinned in
+# test/support/mix/tasks/flatbuf.fetch_fixtures.ex and
+# test/support/flatc.ex.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  ELIXIR_VERSION: "1.19"
+  OTP_VERSION: "28"
+  # @tag in test/support/mix/tasks/flatbuf.fetch_fixtures.ex and
+  # test/support/flatc.ex — bump the cache keys when bumping the pins.
+  FLATBUFFERS_TAG: "v25.12.19"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: lint-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            lint-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors --force
+      - run: mix format --check-formatted
+      - run: mix credo --strict
+
+  test-offline:
+    # No corpus, no flatc: the suite must still pass (corpus-gated
+    # modules skip themselves). This is the fresh-clone experience.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: test-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            test-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      - run: mix deps.get
+      - run: mix test
+
+  test-full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: test-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            test-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      - name: Cache upstream corpus
+        uses: actions/cache@v4
+        with:
+          path: test/fixtures/upstream
+          key: flatbuffers-corpus-${{ env.FLATBUFFERS_TAG }}
+
+      - name: Cache flatc binary
+        uses: actions/cache@v4
+        with:
+          path: _build/test/flatc
+          key: flatc-${{ runner.os }}-${{ env.FLATBUFFERS_TAG }}
+
+      - run: mix deps.get
+
+      # The fetch tasks live under test/support/, so they only exist in
+      # MIX_ENV=test. Both are idempotent no-ops when the caches hit.
+      - name: Fetch upstream corpus
+        run: MIX_ENV=test mix flatbuf.fetch_fixtures
+
+      - name: Fetch flatc
+        run: MIX_ENV=test mix flatbuf.fetch_flatc
+
+      - run: mix test
+
+  dialyzer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: dialyzer-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            dialyzer-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      # Dialyxir keeps its PLTs in _build/dev by default; cache them on
+      # the BEAM versions + lockfile so PLT construction (the slow part)
+      # only reruns when those change.
+      - name: Cache PLTs
+        uses: actions/cache@v4
+        with:
+          path: _build/dev/*.plt*
+          key: plt-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            plt-${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      - run: mix deps.get
+      - run: mix dialyzer

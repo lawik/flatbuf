@@ -5,9 +5,11 @@ defmodule Flatbuf.NicetiesTest do
   enabling `:jason` derives `Jason.Encoder` so a decoded struct
   encodes through the standard library JSON tooling.
 
-  We test by code-generating into strings and asserting the relevant
-  attribute lines appear (or don't), rather than compiling — `:jason`
-  requires the Jason dep, which we don't pull in for the library.
+  Most cases code-generate into strings and assert the relevant
+  attribute lines appear (or don't). Both niceties also get a real
+  compile test: `:jason` is a dev/test-only dep of this library
+  (consumers must add it themselves), so we can compile a `:jason`
+  table and round-trip it through `Jason.encode!/1`.
   """
 
   use ExUnit.Case, async: true
@@ -75,6 +77,27 @@ defmodule Flatbuf.NicetiesTest do
       |> List.flatten()
 
     assert Flatbuf.Table in behaviours
+  end
+
+  test ":jason-flagged module compiles and round-trips through Jason" do
+    schema = """
+    namespace NicetiesTestJason;
+    table Doc { value: int; label: string; }
+    root_type Doc;
+    """
+
+    alias Flatbuf.Test.CodegenCompiler
+
+    CodegenCompiler.compile_source!(schema,
+      wire_module: NicetiesTestJason.Wire,
+      niceties: [:jason]
+    )
+
+    {:ok, bin} = NicetiesTestJason.Doc.encode(%{value: 7, label: "hello"})
+    {:ok, doc} = NicetiesTestJason.Doc.decode(bin)
+
+    json = Jason.encode!(doc)
+    assert Jason.decode!(json) == %{"value" => 7, "label" => "hello"}
   end
 
   test "every emitted table gets the niceties (each can serve as a root)" do

@@ -24,18 +24,15 @@ defmodule Mix.Tasks.Compile.Flatbuf do
 
   ## How it works
 
-  On each `mix compile`, the configured schemas are parsed and resolved.
-  A manifest under
-  `_build/<env>/lib/<app>/.mix/compile.flatbuf` tracks each schema's
-  digest plus the list of files it last emitted. A schema is regenerated
-  when:
-
-    * its source digest no longer matches the manifest entry,
-    * its expected output file is missing or has drifted on disk, or
-    * the codegen options (namespace, wire module, niceties) changed.
-
-  Outputs whose schema was removed from `:schemas` are deleted on the
-  next compile, so a stale `.ex` from an old schema doesn't linger.
+  On each `mix compile`, the configured schemas are parsed, resolved,
+  and code-generated. An output file is only (re)written when it is
+  missing or its on-disk content differs from the freshly generated
+  source — unchanged artifacts keep their mtime, so downstream
+  compilers don't see spurious changes. A manifest under
+  `_build/<env>/lib/<app>/.mix/compile.flatbuf` records schema digests,
+  option digests, and the list of files last emitted. Outputs whose
+  schema was removed from `:schemas` are deleted on the next compile,
+  so a stale `.ex` from an old schema doesn't linger.
 
   ## Configuration keys (`config :my_app, :flatbuf`)
 
@@ -49,7 +46,21 @@ defmodule Mix.Tasks.Compile.Flatbuf do
     * `:include` — list of include search paths.
     * `:niceties` — list of atoms enabling generated-table niceties:
       `:behaviour` (implements `Flatbuf.Table`), `:jason` (derives
-      `Jason.Encoder`).
+      `Jason.Encoder`). Unknown atoms abort the compile.
+
+  ## Nicety dependency caveats
+
+  Niceties add references the consuming project must satisfy:
+
+    * `:jason` — the generated `@derive Jason.Encoder` only compiles
+      if the project depends on `:jason`.
+    * `:behaviour` — the generated `@behaviour Flatbuf.Table` needs
+      `:flatbuf` available when the generated code compiles. With a
+      `only: [:dev, :test]` dependency on `:flatbuf`, prod compiles
+      warn that the `Flatbuf.Table` behaviour is undefined (a hard
+      failure under `--warnings-as-errors`). Note that using this
+      compiler at all requires `:flatbuf` in the compile path, so
+      pair `:behaviour` with a regular dependency.
   """
 
   use Mix.Task.Compiler
@@ -79,7 +90,7 @@ defmodule Mix.Tasks.Compile.Flatbuf do
   def clean() do
     case File.read(manifest_path()) do
       {:ok, bin} ->
-        case :erlang.binary_to_term(bin) do
+        case decode_manifest(bin) do
           %{vsn: @manifest_vsn, files: files} ->
             for path <- files, do: File.rm(path)
 
@@ -109,17 +120,15 @@ defmodule Mix.Tasks.Compile.Flatbuf do
         opts_digest = digest_opts(plan_opts)
         schema_digests = digest_schemas(schemas)
 
-        artifacts_changed? =
-          opts_digest != manifest.opts or
-            schema_digests != manifest.schemas
-
         wrote =
           for %{path: path, source: source} <- artifacts do
             File.mkdir_p!(Path.dirname(path))
 
+            # Write only when the on-disk content actually differs, so
+            # unchanged artifacts keep their mtime and don't trigger
+            # needless downstream recompiles.
             write? =
               cond do
-                artifacts_changed? -> true
                 !File.exists?(path) -> true
                 File.read!(path) != source -> true
                 true -> false
@@ -178,18 +187,41 @@ defmodule Mix.Tasks.Compile.Flatbuf do
         Mix.raise("config :#{app}, :flatbuf must be a keyword list, got: #{inspect(flatbuf)}")
 
       true ->
-        schemas = Keyword.fetch!(flatbuf, :schemas)
+        schemas = fetch_schemas!(app, flatbuf)
 
         plan_opts = [
           out: Keyword.get(flatbuf, :out, "lib"),
           wire_module: Keyword.get(flatbuf, :wire_module, "Flatbuf.Generated.Wire"),
           namespace: Keyword.get(flatbuf, :namespace),
           include: Keyword.get(flatbuf, :include, []),
-          niceties: Keyword.get(flatbuf, :niceties, [])
+          niceties: fetch_niceties!(app, flatbuf)
         ]
 
         {:ok, schemas, plan_opts}
     end
+  end
+
+  defp fetch_schemas!(app, flatbuf) do
+    case Keyword.fetch(flatbuf, :schemas) do
+      {:ok, schemas} when is_list(schemas) ->
+        schemas
+
+      _ ->
+        Mix.raise("""
+        config :#{app}, :flatbuf needs a :schemas key listing the .fbs files \
+        to compile, for example:
+
+            config :#{app}, :flatbuf,
+              schemas: ["priv/fbs/monster.fbs"]
+        """)
+    end
+  end
+
+  defp fetch_niceties!(app, flatbuf) do
+    Gen.validate_niceties!(Keyword.get(flatbuf, :niceties, []))
+  rescue
+    e in ArgumentError ->
+      Mix.raise("config :#{app}, :flatbuf — " <> Exception.message(e))
   end
 
   defp manifest_path() do
@@ -201,7 +233,7 @@ defmodule Mix.Tasks.Compile.Flatbuf do
 
     case File.read(path) do
       {:ok, bin} ->
-        case :erlang.binary_to_term(bin) do
+        case decode_manifest(bin) do
           %{vsn: @manifest_vsn} = m -> Map.merge(empty, m)
           _ -> empty
         end
@@ -209,6 +241,14 @@ defmodule Mix.Tasks.Compile.Flatbuf do
       _ ->
         empty
     end
+  end
+
+  # A truncated or otherwise corrupt manifest must not crash
+  # `mix compile` / `mix clean` — treat it as absent instead.
+  defp decode_manifest(bin) do
+    :erlang.binary_to_term(bin)
+  rescue
+    ArgumentError -> :corrupt
   end
 
   defp save_manifest(path, manifest) do
@@ -229,8 +269,9 @@ defmodule Mix.Tasks.Compile.Flatbuf do
   end
 
   defp digest_opts(opts) do
-    # Niceties / namespace / wire module changes warrant a full rebuild;
-    # `out` doesn't (it's reflected in each path).
+    # Recorded in the manifest alongside the schema digests so the last
+    # emit's inputs are traceable; `out` is excluded because it's
+    # already reflected in each artifact path.
     opts
     |> Keyword.take([:wire_module, :namespace, :include, :niceties])
     |> :erlang.term_to_binary()
