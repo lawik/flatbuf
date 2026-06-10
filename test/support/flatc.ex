@@ -234,7 +234,7 @@ defmodule Flatbuf.Test.Flatc do
     with {:ok, dir} <- tmp_dir(),
          bin_path = Path.join(dir, "input.bin"),
          :ok <- File.write(bin_path, binary),
-         {out, _} <-
+         {out, code} <-
            System.cmd(
              ensure_available!(),
              include_args(opts) ++
@@ -245,7 +245,7 @@ defmodule Flatbuf.Test.Flatc do
            ) do
       # flatc always outputs JSON as `<basename>.json`, but we wrote
       # the *input* binary as input.bin — flatc reads it via `--`
-      # and emits input.json. If it didn't, surface the stderr.
+      # and emits input.json. If it didn't, surface the failure.
       json_path = Path.join(dir, "input.json")
 
       case File.read(json_path) do
@@ -257,12 +257,34 @@ defmodule Flatbuf.Test.Flatc do
           json = normalize_flatc_floats(json)
           {:ok, JSON.decode!(json)}
 
+        {:error, _} when code >= 128 ->
+          # 128+N means flatc died from signal N (e.g. 139 = SIGSEGV)
+          # without producing any diagnostics.
+          {:error, {:flatc_crash, {:exit_status, code}}}
+
         {:error, _} ->
-          {:error, {:flatc_no_json, out}}
+          {:error, {:flatc_no_json, summarize_output(out)}}
       end
     end
   after
     cleanup_tmp()
+  end
+
+  # Reduce flatc's stdout/stderr to a stable one-line summary: drop the
+  # multi-page usage dump it prefixes to CLI-level errors, keep the
+  # `error:` payload, and strip directory components so manifests don't
+  # pin machine-specific paths (tmp dirs, the flatc executable).
+  defp summarize_output(out) do
+    msg =
+      case Regex.run(~r/error:\s*\n?\s*(.+)/, out) do
+        [_, msg] -> msg
+        nil -> out
+      end
+
+    msg
+    |> String.replace(~r{(?:/[^\s:/]+)+/}, "")
+    |> String.trim()
+    |> String.slice(0, 200)
   end
 
   defp normalize_flatc_floats(json) do
@@ -304,8 +326,11 @@ defmodule Flatbuf.Test.Flatc do
              stderr_to_stdout: true
            ) do
       cond do
+        code >= 128 ->
+          {:error, {:flatc_crash, {:exit_status, code}}}
+
         code != 0 ->
-          {:error, {:flatc_failed, out}}
+          {:error, {:flatc_failed, summarize_output(out)}}
 
         true ->
           # flatc names the output `<basename>.<file_extension>`, where
@@ -314,8 +339,8 @@ defmodule Flatbuf.Test.Flatc do
           # produced.
           case Path.wildcard(Path.join(dir, "input.*")) |> Enum.reject(&(&1 == json_path)) do
             [bin_path] -> File.read(bin_path)
-            [] -> {:error, {:flatc_no_output, out}}
-            many -> {:error, {:flatc_ambiguous, many}}
+            [] -> {:error, {:flatc_no_output, summarize_output(out)}}
+            many -> {:error, {:flatc_ambiguous, Enum.map(many, &Path.basename/1)}}
           end
       end
     end
