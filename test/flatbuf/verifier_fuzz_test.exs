@@ -85,7 +85,11 @@ defmodule Flatbuf.VerifierFuzzTest do
     end)
   end
 
-  test "huge u32 length values are rejected, not honored" do
+  # A huge length injected at an arbitrary slot may still leave a valid
+  # buffer (not every 4-byte slot is a length), so rejection isn't
+  # guaranteed — the property is that the verifier never crashes or
+  # reads out of bounds.
+  test "huge u32 length injections never crash (return :ok or {:error, _})" do
     bin = seed_buffer()
 
     # Try injecting a 0xFFFFFFFE length at every 4-byte aligned position
@@ -126,7 +130,9 @@ defmodule Flatbuf.VerifierFuzzTest do
     assert {:error, _} = safe_verify(:binary.copy(<<0>>, 128))
   end
 
-  test "random-bytes buffers are rejected" do
+  # Random bytes could in principle form a valid buffer, so we assert
+  # the no-crash property rather than guaranteed rejection.
+  test "random-bytes buffers never crash the verifier" do
     seed_pid = self()
 
     Enum.each(1..200, fn _ ->
