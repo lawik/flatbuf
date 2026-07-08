@@ -8,6 +8,8 @@ plain `.ex` files — generate, commit, drop the dep.
 > feature matrix; see [Limitations](#limitations) for what's out of
 > scope and what's not done yet.
 
+Heavy use of LLM in development. Don't assume human intent.
+
 ## Install
 
 ```elixir
