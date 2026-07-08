@@ -10,7 +10,7 @@ defmodule Flatbuf.MixProject do
     [
       app: :flatbuf,
       version: "0.1.0",
-      elixir: "~> 1.19",
+      elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       # Tests compile generated modules into the running VM, including
