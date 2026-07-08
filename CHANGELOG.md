@@ -144,7 +144,6 @@
 
 ## v0.1.0
 
-- Initial extraction from `sprawl/arrow`. Phases 1 and 2 of the spec
-  in `SPEC.md` are implemented: parser, resolver, codegen for
+- Initial extraction from `sprawl/arrow`: parser, resolver, codegen for
   tables/structs/enums/unions, JSON converter, verifier, and the
   `mix flatbuf.gen` task with namespace/include overrides.
